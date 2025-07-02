@@ -1,0 +1,5 @@
+STAGING_BUCKET = "ck-data-pipeline-new-master-staging"
+DEFAULT_APP = "aws_az_analytics_application_refresh"
+DEFAULT_MODULE = "analytics"
+DEFAULT_PROCESSING_MODE = "production"
+MAX_COPY_WORKERS = 100
