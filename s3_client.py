@@ -1,19 +1,24 @@
+#
+# s3_client.py (Updated)
+#
 import os
 import boto3
 import logging
-from typing import List, Dict, Any
+from typing import Dict, Any, Optional
+from datetime import datetime
 import boto3.session
 from botocore.exceptions import ClientError
 from config import S3_CONFIG, PAYER_CONFIGS, MAX_COPY_WORKERS
-from snowflake_external_table import SnowflakeConfigFetcher # Import new class
+from snowflake_external_table import SnowflakeConfigFetcher
 
 logger = logging.getLogger(__name__)
 
 class S3Client:
+    # ... (the first part of the class remains the same) ...
     """Enhanced S3 client for cross-account and cross-region operations"""
     def __init__(self, region_name=None):
+        self.region = region_name or S3_CONFIG.get('region_name', 'us-east-2')
         self.s3_client = None
-        self.region = region_name or S3_CONFIG['region_name']
         self._init_s3_client()
 
     def _init_s3_client(self):
@@ -30,31 +35,32 @@ class S3Client:
                 retries={'max_attempts': S3_CONFIG['max_attempts']},
                 max_pool_connections=MAX_COPY_WORKERS
             )
-            self.s3_client = session.client(
-                's3',
-                region_name=self.region,
-                config=client_config
-            )
-            logger.info(f"S3 client initialized ({self.region}) with connection pool size: {MAX_COPY_WORKERS}")
+            self.s3_client = session.client('s3', region_name=self.region, config=client_config)
+            logger.info(f"S3 client initialized for region '{self.region}' with connection pool size: {MAX_COPY_WORKERS}")
         except Exception as e:
             logger.error(f"Failed to initialize S3 client: {str(e)}")
             raise
 
-    def validate_bucket_access(self, bucket_name: str) -> bool:
-        """Validate bucket access"""
+    def can_access_bucket(self, bucket_name: str) -> bool:
+        """Checks if the role has s3:ListBucket permission on a bucket."""
         try:
             self.s3_client.head_bucket(Bucket=bucket_name)
-            logger.info(f"Validated access to bucket: {bucket_name}")
+            logger.debug(f"Access to bucket '{bucket_name}' confirmed.")
             return True
+        except ClientError as e:
+            if e.response['Error']['Code'] in ('403', 'AccessDenied'):
+                logger.warning(f"Access DENIED for bucket '{bucket_name}'.")
+            else:
+                logger.error(f"Error checking access for bucket '{bucket_name}': {e}")
+            return False
         except Exception as e:
-            logger.error(f"No access to bucket {bucket_name}: {str(e)}")
+            logger.error(f"Unexpected error checking bucket access for '{bucket_name}': {e}")
             return False
 
-    def list_objects_with_metadata(self, bucket: str, prefix: str) -> Dict[str, Dict[str, Any]]:
+    def list_objects_with_metadata(self, bucket: str, prefix: str, since: Optional[datetime] = None) -> Dict[str, Dict[str, Any]]:
         """
-        Lists all objects under a prefix, returning a map of
-        filename -> {'ETag': str, 'Size': int}.
-        Efficiently handles pagination.
+        Lists all objects under a prefix, returning a map of filename -> {'ETag', 'Size'}.
+        Optionally, only returns objects modified *since* a given datetime.
         """
         objects_map = {}
         try:
@@ -62,27 +68,31 @@ class S3Client:
             pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
             for page in pages:
                 for obj in page.get('Contents', []):
+                    # --- NEW LOGIC ---
+                    if since and obj['LastModified'] <= since:
+                        continue # Skip this object as it's not new
+                    # --- END NEW LOGIC ---
                     filename = os.path.basename(obj['Key'])
                     if filename:
                         objects_map[filename] = {
                             'ETag': obj['ETag'].strip('"'),
-                            'Size': obj['Size']
+                            'Size': obj['Size'],
+                            'LastModified': obj['LastModified']
                         }
-            logger.debug(f"Found {len(objects_map)} objects with metadata in s3://{bucket}/{prefix}")
+            if since:
+                logger.debug(f"Found {len(objects_map)} objects modified since {since} in s3://{bucket}/{prefix}")
+            else:
+                logger.debug(f"Found {len(objects_map)} objects with metadata in s3://{bucket}/{prefix}")
         except ClientError as e:
             logger.error(f"Failed to list objects in s3://{bucket}/{prefix}: {e}")
             raise
         return objects_map
 
     def copy_single_file(self, source_bucket: str, source_key: str, dest_bucket: str, dest_key: str) -> bool:
-        """Copy a single file with enhanced error handling"""
+        """Copy a single file with enhanced error handling."""
         try:
             copy_source = {'Bucket': source_bucket, 'Key': source_key}
-            self.s3_client.copy_object(
-                CopySource=copy_source,
-                Bucket=dest_bucket,
-                Key=dest_key
-            )
+            self.s3_client.copy_object(CopySource=copy_source, Bucket=dest_bucket, Key=dest_key)
             logger.debug(f"Successfully copied: {os.path.basename(source_key)}")
             return True
         except ClientError as e:
@@ -92,53 +102,64 @@ class S3Client:
             logger.error(f"An unexpected error occurred during copy of {source_key}: {e}")
             return False
 
+# ... (PayerConfigManager class remains the same) ...
 class PayerConfigManager:
     """
-    Manage payer configurations.
+    Manages payer configurations.
     Primary source: Snowflake table.
     Fallback source: Local config.py file.
     """
     def __init__(self, environment: str):
         self.environment = environment
-        self.configs = {}
-        self._load_configs()
-        self._update_config_for_environment()
+        self.snowflake_configs = {}
+        self.fallback_configs = PAYER_CONFIGS.copy()
+        self._load_snowflake_configs()
 
-    def _load_configs(self):
+    def _load_snowflake_configs(self):
         """Load payer configs from Snowflake, with a fallback to local file."""
         logger.info("Attempting to load payer configurations from Snowflake (primary source)...")
         try:
             fetcher = SnowflakeConfigFetcher(self.environment)
-            snowflake_configs = fetcher.get_payer_configs()
-            if snowflake_configs:
-                self.configs = snowflake_configs
-                logger.info(f"Successfully loaded {len(self.configs)} payer configurations from Snowflake.")
-                return
-            else:
-                logger.warning("Snowflake returned no payer configurations. Will attempt to use local fallback.")
+            self.snowflake_configs = fetcher.get_payer_configs()
+            logger.info(f"SUCCESS: Loaded {len(self.snowflake_configs)} payer configurations from Snowflake.")
         except Exception as e:
-            logger.error(f"Failed to load payer configurations from Snowflake: {e}. Using local fallback.")
-
-        # Fallback to local config if Snowflake fails or returns no data
-        logger.warning("Using fallback payer configurations from local config.py file.")
-        self.configs = PAYER_CONFIGS.copy()
-        if not self.configs:
-             logger.error("CRITICAL: Fallback local configuration is also empty. No payer configs available.")
-
+            logger.error(f"Failed to load configs from Snowflake: {e}. Will rely solely on local fallback.", exc_info=True)
+            self.snowflake_configs = {}
 
     def get_payer_config(self, payer_id: str) -> Dict[str, Any]:
-        """Get a specific payer's configuration."""
-        config = self.configs.get(payer_id)
-        if not config:
-            logger.error(f"Configuration for payer_id '{payer_id}' not found in Snowflake or local config.")
-        return config
+        """
+        Gets a specific payer's configuration from Snowflake first.
+        If not found, it tries the local fallback config.
+        """
+        # Try primary source first
+        config = self.snowflake_configs.get(payer_id)
+        if config:
+            logger.debug(f"Using Snowflake configuration for payer '{payer_id}'.")
+            return self._finalize_config(config)
+        
+        # Try fallback source
+        config = self.fallback_configs.get(payer_id)
+        if config:
+            logger.warning(f"Payer '{payer_id}' not in Snowflake configs. Using local fallback configuration.")
+            return self._finalize_config(config)
+            
+        logger.error(f"CRITICAL: Configuration for payer_id '{payer_id}' not found in Snowflake OR local config.")
+        return None
 
-    def _update_config_for_environment(self):
-        """Update configurations based on environment (prod vs non-prod)."""
+    def get_fallback_config(self, payer_id: str) -> Dict[str, Any]:
+        """Explicitly gets the fallback configuration for a payer."""
+        config = self.fallback_configs.get(payer_id)
+        if config:
+            logger.warning(f"Explicitly using local FALLBACK configuration for payer '{payer_id}'.")
+            return self._finalize_config(config)
+        logger.error(f"CRITICAL: Fallback configuration for payer_id '{payer_id}' not found.")
+        return None
+
+    def _finalize_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Applies environment-specific transformations to a config dictionary."""
         if self.environment.lower() == 'prod':
-            logger.info("Updating configurations for PRODUCTION environment.")
-            for payer_id, config in self.configs.items():
-                if 'bucket' in config and '-nonprod' in config['bucket']:
-                    config['bucket'] = config['bucket'].replace('-nonprod', '')
-                    logger.debug(f"Updated bucket for {payer_id} to '{config['bucket']}' for production.")
-        logger.info(f"Configurations finalized for environment: {self.environment}")
+            if 'bucket' in config and '-nonprod' in config['bucket']:
+                original_bucket = config['bucket']
+                config['bucket'] = original_bucket.replace('-nonprod', '')
+                logger.debug(f"Updated bucket for prod: '{original_bucket}' -> '{config['bucket']}'")
+        return config

@@ -7,26 +7,7 @@ from typing import List, Optional
 import pika
 from pika.exceptions import AMQPConnectionError
 
-try:
-    from config import RABBITMQ_CONFIG, VHOST_MAPPING
-except ImportError:
-    # Fallback configuration if the config module isn't available in a different context
-    logging.warning("Could not import from 'config', using fallback RabbitMQ configuration.")
-    RABBITMQ_CONFIG = {
-        'host': os.environ.get('RABBITMQ_HOST', 'b-77fd0f83-6a7a-467d-a0a8-0f3c39997ac7.mq.us-east-1.amazonaws.com'),
-        'username': os.environ.get('RABBITMQ_USERNAME', 'cloudomonic-prod-user'),
-        'password': os.environ.get('RABBITMQ_PASSWORD', '82HCh6cL9a31'),
-        'exchange_name': "payer_refresh_exchange",
-        'routing_key_base': "*", # Correct routing key for a topic exchange
-        'port': 5671
-    }
-    VHOST_MAPPING = {
-        'dev': 'dev2',
-        'dev2': 'dev2',
-        'uat': 'cloudonomic_uat',
-        'qa1': 'qa1',
-        'prod': 'cloudonomic_prod'
-    }
+from config import RABBITMQ_CONFIG, VHOST_MAPPING, get_environment_config
 
 logger = logging.getLogger(__name__)
 
@@ -35,51 +16,31 @@ class RabbitMQNotifier:
     A self-contained RabbitMQ notifier designed to connect, send a single message
     to a topic exchange, and then disconnect gracefully. Ideal for ephemeral tasks.
     """
-    def __init__(self, environment: str = 'prod'):
+    def __init__(self, environment: str = 'uat'):
         """
-        Initializes the notifier with connection details from the application config.
+        Initializes the notifier with connection details based on the provided environment.
 
         Args:
-            environment (str): The target environment (e.g., 'dev', 'uat', 'prod'),
-                               which determines the virtual host.
+            environment (str): The target environment (e.g., 'dev', 'uat', 'prod').
         """
-        self.host = RABBITMQ_CONFIG['host']
-        self.port = RABBITMQ_CONFIG['port']
-        self.username = RABBITMQ_CONFIG['username']
-        self.password = RABBITMQ_CONFIG['password']
+        self.env_config = get_environment_config(environment)
+        creds = self.env_config['rabbitmq_creds']
+
+        self.host = creds['host']
+        self.port = creds['port']
+        self.username = creds['username']
+        self.password = creds['password']
+        self.virtual_host = self.env_config['vhost']
+        
         self.exchange_name = RABBITMQ_CONFIG['exchange_name']
         self.routing_key = RABBITMQ_CONFIG['routing_key_base']
-        self.virtual_host = self._get_virtual_host(environment)
+        
         logger.info(f"RabbitMQNotifier configured for env:'{environment}' -> vhost:'{self.virtual_host}'")
 
-    def _get_virtual_host(self, environment: str) -> str:
-        """
-        Determines the correct RabbitMQ virtual host based on the environment mapping.
-        An explicit environment variable `RABBITMQ_VHOST` can override the mapping.
-        """
-        env_lower = environment.lower()
-        explicit_vhost = os.environ.get('RABBITMQ_VHOST')
-        if explicit_vhost:
-            logger.info(f"Using explicit RABBITMQ_VHOST override: {explicit_vhost}")
-            return explicit_vhost
-
-        mapped_vhost = VHOST_MAPPING.get(env_lower)
-        if mapped_vhost:
-            return mapped_vhost
-        else:
-            available_envs = ', '.join(VHOST_MAPPING.keys())
-            error_msg = f"Unknown environment '{environment}'. Cannot map to a vhost. Available environments: {available_envs}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-
     def _get_connection_params(self) -> pika.ConnectionParameters:
-        """
-        Constructs the Pika connection parameters object with SSL/TLS options.
-        """
+        """Constructs the Pika connection parameters object with SSL/TLS options."""
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
-        # Recommended secure cipher suite
         ssl_context.set_ciphers('ECDHE+AESGCM:!ECDSA')
-
         credentials = pika.PlainCredentials(self.username, self.password)
         
         return pika.ConnectionParameters(
@@ -96,26 +57,10 @@ class RabbitMQNotifier:
         """
         Establishes a connection, sends a single notification message with retry logic,
         and ensures the connection is closed.
-
-        Args:
-            month (int): The month of the data processed.
-            year (int): The year of the data processed.
-            module (str): The name of the processing module (e.g., 'analytics').
-            payer_ids (List[str]): A list of payer IDs included in the process.
-            status (str): The final status of the task ('SUCCESS', 'FAILED', etc.).
-            partner_id (int): The partner ID associated with the task.
-            message (Optional[str]): An optional descriptive message.
-
-        Returns:
-            bool: True if the message was successfully published, False otherwise.
         """
         payload = {
-            "month": month,
-            "year": year,
-            "module": module,
-            "payerIds": payer_ids,
-            "status": status.upper(),
-            "partnerId": partner_id
+            "month": month, "year": year, "module": module, "payerIds": payer_ids,
+            "status": status.upper(), "partnerId": partner_id
         }
         if message:
             payload["message"] = message
@@ -126,24 +71,20 @@ class RabbitMQNotifier:
         
         for attempt in range(max_retries):
             try:
-                # Step 1: Establish a new connection for this attempt
                 params = self._get_connection_params()
                 connection = pika.BlockingConnection(params)
                 channel = connection.channel()
-                
-                # Enable publisher confirms to ensure the message is received by the broker
                 channel.confirm_delivery()
 
-                # Step 2: Publish the message
                 channel.basic_publish(
                     exchange=self.exchange_name,
-                    routing_key=self.routing_key, # Use the correct routing key
+                    routing_key=self.routing_key,
                     body=message_body,
                     properties=pika.BasicProperties(
                         delivery_mode=2,  # Make message persistent
                         content_type='application/json'
                     ),
-                    mandatory=True # Return message to publisher if it cannot be routed
+                    mandatory=True
                 )
                 
                 logger.info("Successfully published message to RabbitMQ.")
@@ -159,13 +100,10 @@ class RabbitMQNotifier:
                     logger.error("Failed to connect to RabbitMQ after all retries.")
             except Exception as e:
                 logger.error(f"An unexpected error occurred while sending RabbitMQ notification: {e}", exc_info=True)
-                # Break on unexpected errors as retrying may not help
                 break
             finally:
-                # Step 3: Ensure the connection is closed
                 if connection and connection.is_open:
                     connection.close()
                     logger.debug("RabbitMQ connection for this attempt has been closed.")
         
-        # If the loop completes without returning True, it means all attempts failed.
         return False

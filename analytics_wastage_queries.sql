@@ -11,7 +11,7 @@ WHERE
 t.line_item_line_item_type = 'DiscountedUsage' 
 and f.value:key in ('product_name')
 AND f.value:value = 'Amazon Elastic Compute Cloud'
-and bill_payer_account_id in (#payer_ids)
+and bill_payer_account_id in (#payers_ids)
 group by 1;
 
 
@@ -41,7 +41,7 @@ SELECT DISTINCT
                             when t.LINE_ITEM_USAGE_TYPE like '%.xl%' then 8
                             when t.LINE_ITEM_USAGE_TYPE like '%.l%'  then 4
                             else line_item_normalization_factor
-                            end as line_item_normalization_factor,
+                            end as nfactor_used,
        case
 	    WHEN line_item_operation like 'RunInstances:0004%'
 		THEN 'Linux/UNIX and SQL Server Standard'
@@ -157,11 +157,12 @@ FROM analytics_application_table_#startyear_#startmonth t,
 WHERE t.line_item_line_item_type IN ('RIFee')
 AND extract(month from t.line_item_usage_start_date) = #startmonth
 and extract(year from t.line_item_usage_start_date) = #startyear
-and bill_payer_account_id in (#payer_ids)
+and bill_payer_account_id in (#payers_ids)
+
 GROUP BY 
     t.reservation_reservation_a_r_n,
     t.LINE_ITEM_USAGE_TYPE,
-    t.line_item_normalization_factor,
+    nfactor_used,
     t.line_item_operation,
     t.bill_payer_account_id,
     t.line_item_usage_account_id
@@ -169,75 +170,87 @@ HAVING MAX(CASE WHEN f.value:key = 'product_name' THEN f.value:value::STRING END
 
 )
 
- SELECT
-     SPLIT_PART(m.RESERVATION_RESERVATION_A_R_N, '/', 2) AS reservation_id,
-     line_item_usage_start_date as lineitem_usagestartdate,
- 	case when line_item_line_item_type = 'RIFee' then 
- 	DATEADD(SECOND, 1, line_item_usage_end_date) 
- 	else  line_item_usage_end_date end as lineitem_usageenddate,
-     m.bill_payer_account_id as bill_payeraccountid,
- 	b.payer_name,
-     r.line_item_usage_account_id as lineitem_usageaccountid,
-     r.mycloud_family_flexible AS instancetype_family,
-     r.INSTANCE_TYPE as instancetype,
-     extract(month from line_item_usage_start_date) as mycloud_startmonth,
-     extract(year from line_item_usage_start_date) as mycloud_startyear,
-     r.product_productname,
-     r.mycloud_operatingsystem,
-     r.mycloud_region,
-     pricing_offering_class AS offering_type,
-     line_item_line_item_type as lineitem_lineitemtype,
-     m.RESERVATION_RESERVATION_A_R_N as RESERVATION_RESERVATIONARN,
-     reservation_number_of_reservations as reservation_numberofreservations,
-     SUM(
-         CASE
-             WHEN line_item_line_item_type = 'RIFee' THEN r.line_item_normalization_factor
-             ELSE 0
-         END
-     ) AS lineitem_normalizationfactor,
-     SUM(line_item_normalized_usage_amount) AS lineitem_normalizedusageamount,
-     SUM(line_item_unblended_cost) AS lineitem_unblendedcost,
-     SUM(reservation_effective_cost) AS reservation_EffectiveCost,
-     SUM(
-         CASE
-             WHEN pricing_public_on_demand_cost = 0 THEN 0
-             ELSE pricing_public_on_demand_cost::DECIMAL(30,8)
-         END
-     ) AS mycloud_ondemandprice,
-     SUM(
-         CASE
-             WHEN line_item_line_item_type = 'RIFee' THEN (
-                 COALESCE(line_item_unblended_rate::REAL, 0) +
-                 CASE
-                     WHEN DATEDIFF(hour, line_item_usage_start_date, DATEADD(second, 2, line_item_usage_end_date)) = 0 THEN 0
-                     ELSE (
-                         reservation_amortized_upfront_fee_for_billing_period /
-                         (
-                             DATEDIFF(hour, line_item_usage_start_date, DATEADD(second, 2, line_item_usage_end_date)) * reservation_number_of_reservations
-                         )
-                     )
-                 END
-             )
-             ELSE 0
-         END
-     ) AS ri_hourly_effective_cost
- FROM
-     analytics_application_table_#startyear_#startmonth  m
+SELECT
+    SPLIT_PART(m.RESERVATION_RESERVATION_A_R_N, '/', 2) AS reservation_id,
+    line_item_usage_start_date as lineitem_usagestartdate,
+	case when line_item_line_item_type = 'RIFee' then 
+	DATEADD(SECOND, 1, line_item_usage_end_date) 
+	else  line_item_usage_end_date end as lineitem_usageenddate,
+    m.bill_payer_account_id as bill_payeraccountid,
+	b.payer_name,
+    r.line_item_usage_account_id as lineitem_usageaccountid,
+    r.mycloud_family_flexible AS instancetype_family,
+    r.INSTANCE_TYPE as instancetype,
+    extract(month from line_item_usage_start_date) as mycloud_startmonth,
+    extract(year from line_item_usage_start_date) as mycloud_startyear,
+    r.product_productname,
+    r.mycloud_operatingsystem,
+    r.mycloud_region,
+    pricing_offering_class AS offering_type,
+    line_item_line_item_type as lineitem_lineitemtype,
+    m.RESERVATION_RESERVATION_A_R_N as RESERVATION_RESERVATIONARN,
+    reservation_number_of_reservations as reservation_numberofreservations,
+SUM(
+    CASE 
+        WHEN line_item_line_item_type = 'RIFee' THEN 
+            CASE 
+                WHEN line_item_normalization_factor = 0 or line_item_normalization_factor is null  THEN r.nfactor_used
+                ELSE line_item_normalization_factor
+            END
+        ELSE 0
+    END
+) AS lineitem_normalizationfactor,
+    SUM( case 
+            when line_item_normalized_usage_amount = 0 or line_item_normalized_usage_amount  is null
+            then r.nfactor_used * line_item_usage_amount
+            else line_item_normalized_usage_amount
+            end
+        ) AS lineitem_normalizedusageamount,
+    SUM(line_item_unblended_cost) AS lineitem_unblendedcost,
+    SUM(reservation_effective_cost) AS reservation_EffectiveCost,
+    SUM(
+        CASE
+            WHEN pricing_public_on_demand_cost = 0 THEN 0
+            ELSE pricing_public_on_demand_cost::DECIMAL(30,8)
+        END
+    ) AS mycloud_ondemandprice,
+    SUM(
+        CASE
+            WHEN line_item_line_item_type = 'RIFee' THEN (
+                COALESCE(line_item_unblended_rate::REAL, 0) +
+                CASE
+                    WHEN DATEDIFF(hour, line_item_usage_start_date, DATEADD(second, 2, line_item_usage_end_date)) = 0 THEN 0
+                    ELSE (
+                        reservation_amortized_upfront_fee_for_billing_period /
+                        (
+                            DATEDIFF(hour, line_item_usage_start_date, DATEADD(second, 2, line_item_usage_end_date)) * reservation_number_of_reservations
+                        )
+                    )
+                END
+            )
+            ELSE 0
+        END
+    ) AS ri_hourly_effective_cost
+FROM
+    analytics_application_table_#startyear_#startmonth  m
+      
+    
 
- LEFT JOIN
-     payer_billdesk_config.payers b ON b.payer_account_id = m.bill_payer_account_id
+LEFT JOIN
+    payer_billdesk_config.payers b ON b.payer_account_id = m.bill_payer_account_id
 
- JOIN
-     rifee_data r ON 
-         r.RESERVATION_RESERVATION_A_R_N = m.RESERVATION_RESERVATION_A_R_N AND
-         r.bill_payer_account_id = m.bill_payer_account_id 
- WHERE
-     extract(month from m.line_item_usage_start_date) = #startmonth
-    and extract(year from m.line_item_usage_start_date) = #startyear and
-     m.line_item_line_item_type IN ('RIFee', 'DiscountedUsage', 'VDiscountedUsage')
-     AND m.line_item_line_item_type NOT IN ('Credit', 'Tax', 'Refund')
-     and m.bill_payer_account_id in (#payer_ids)
- GROUP BY ALL;
+left JOIN
+    rifee_data r ON 
+        r.RESERVATION_RESERVATION_A_R_N = m.RESERVATION_RESERVATION_A_R_N AND
+        r.bill_payer_account_id = m.bill_payer_account_id 
+      
+WHERE
+    extract(month from m.line_item_usage_start_date) = #startmonth
+   and extract(year from m.line_item_usage_start_date) = #startyear 
+   and m.line_item_line_item_type IN ('RIFee', 'DiscountedUsage', 'VDiscountedUsage')
+    AND m.line_item_line_item_type NOT IN ('Credit', 'Tax', 'Refund')
+    and m.bill_payer_account_id in (#payers_ids)
+GROUP BY ALL;
 
 
 CREATE OR REPLACE TEMPORARY TABLE ec2_ri_utilization_report_hourly_temp AS
@@ -248,15 +261,12 @@ WITH RECURSIVE hourSequence AS (
   FROM hourSequence
   WHERE seq < 24*DATEDIFF(DAY, date_from_parts(#startyear,#startmonth,1), dateadd('day',1,last_day(date_from_parts(#startyear,#startmonth,1)))) - 1
 )
-
 select
     RESERVATION_ID,
     bill_payeraccountid,
-    
     payer_name,
     a.family_type ,
     a.customer_name ,
-    
 	lineitem_usageaccountid as linkedaccountid,
 	DATEADD(hour, seq,date_from_parts(#startyear,#startmonth, 1)) AS startdate,
     DATEADD(second, -1, DATEADD(hour, 1, DATEADD(hour, seq, date_from_parts(#startyear,#startmonth,1)))) AS enddate,
@@ -296,7 +306,7 @@ cross join hourSequence wtp
 
 where
 		mycloud_startmonth= #startmonth
-	AND mycloud_startyear= #startyear and
+	AND mycloud_startyear= #startyear  and
   	((( cast(startDate as timestamp) between lineitem_usagestartdate and lineitem_usageenddate
 	or cast(endDate as timestamp) between lineitem_usagestartdate and lineitem_usageenddate
  or
@@ -316,16 +326,16 @@ where
 	group by all;
 
 
+
 DELETE
 FROM ck_analytics_application_ri_wastage_hourly
 WHERE
 extract(month from lineitem_usagestartdate) = #startmonth
 and extract(year from lineitem_usagestartdate) = #startyear
-and bill_payeraccountid in (#payer_ids)
+and bill_payeraccountid in (#payers_ids)
 and product_name = 'EC2(RIs)';
 
 
-    
 insert into ck_analytics_application_ri_wastage_hourly (
 RESERVATION_ARN,PAYER_NAME,BILL_PAYERACCOUNTID,USAGEACCOUNTID,ACCOUNT_TYPE,CUSTOMER_NAME,REGION,PRODUCT_NAME,
 OPERATINGSYSTEM_ENGINE,INSTANCETYPE_FAMILY,SAVINGSPLAN_TYPE,LINEITEM_USAGESTARTDATE,TOTAL_NU,USED_NU,UNUSED_NU,
@@ -368,6 +378,10 @@ where
 a.STARTDATE <= b.max_date and 
 reservedHours <> 0;
 
+
+
+
+
 -------------------- RDS Wastage ------------------------------------------
 
 CREATE OR REPLACE TEMPORARY TABLE rds_payer_max_date as
@@ -380,8 +394,10 @@ WHERE
 t.line_item_line_item_type = 'DiscountedUsage' 
 and f.value:key in ('product_name')
 AND f.value:value = 'Amazon Relational Database Service'
-and bill_payer_account_id in (#payer_ids)
+and bill_payer_account_id in (#payers_ids)
 group by 1;
+
+
 
 
 CREATE OR replace TEMPORARY TABLE rds_ri_util_report_temp AS 
@@ -464,7 +480,7 @@ WITH rifee_data AS (
                             WHEN line_item_usage_type like '%.l%'  and (line_item_usage_type like '%Multi-AZ%' or line_item_usage_type like '%MirrorUsage%')
                             THEN 8
                             else line_item_normalization_factor
-                            end as line_item_normalization_factor,
+                            end as nfactor_used,
         case
 		WHEN line_item_operation = 'CreateDBInstance:0002'
 		THEN 'MySQL'
@@ -597,11 +613,11 @@ WITH rifee_data AS (
 WHERE t.line_item_line_item_type IN ('RIFee')
 AND extract(month from t.line_item_usage_start_date) = #startmonth
 and extract(year from t.line_item_usage_start_date) = #startyear
-and bill_payer_account_id in (#payer_ids)
+and bill_payer_account_id in (#payers_ids)
 GROUP BY 
     t.reservation_reservation_a_r_n,
     t.LINE_ITEM_USAGE_TYPE,
-    t.line_item_normalization_factor,
+    nfactor_used,
     t.line_item_operation,
     t.bill_payer_account_id,
     t.line_item_usage_account_id
@@ -630,10 +646,22 @@ HAVING MAX(CASE WHEN f.value:key = 'product_name' THEN f.value:value::STRING END
     m.RESERVATION_RESERVATION_A_R_N as RESERVATION_RESERVATIONARN,
     reservation_number_of_reservations as reservation_numberofreservations,
         
-		sum(case when line_item_line_item_type in ('RIFee') then r.line_item_normalization_factor  else 0 end ) as 
-            lineitem_normalizationfactor,
-        
-		sum(line_item_normalized_usage_amount) as lineitem_normalizedusageamount,
+	SUM(
+    CASE 
+        WHEN line_item_line_item_type = 'RIFee' THEN 
+            CASE 
+                WHEN line_item_normalization_factor = 0 or line_item_normalization_factor is null  THEN r.nfactor_used
+                ELSE line_item_normalization_factor
+            END
+        ELSE 0
+    END
+) AS lineitem_normalizationfactor,
+    SUM( case 
+            when line_item_normalized_usage_amount = 0 or line_item_normalized_usage_amount  is null
+            then r.nfactor_used * line_item_usage_amount
+            else line_item_normalized_usage_amount
+            end
+        ) AS lineitem_normalizedusageamount,
 		sum(line_item_unblended_cost) as lineitem_unblendedcost,
 		sum(reservation_effective_cost) as reservation_EffectiveCost,
 		SUM(
@@ -664,7 +692,7 @@ HAVING MAX(CASE WHEN f.value:key = 'product_name' THEN f.value:value::STRING END
 LEFT JOIN
     payer_billdesk_config.payers b ON b.payer_account_id = m.bill_payer_account_id
    
- JOIN
+ LEFT JOIN
     rifee_data r ON 
         r.RESERVATION_RESERVATION_A_R_N = m.RESERVATION_RESERVATION_A_R_N AND
         r.bill_payer_account_id = m.bill_payer_account_id 
@@ -672,7 +700,7 @@ WHERE
  
     extract(month from m.line_item_usage_start_date) = #startmonth
    and extract(year from m.line_item_usage_start_date) = #startyear 
-    and m.bill_payer_account_id in (#payer_ids) and
+    and m.bill_payer_account_id in (#payers_ids) and
 		 line_item_line_item_type not in ('Credit','Tax','Refund')
 		and line_item_line_item_type  in ('DiscountedUsage','VDiscountedUsage','RIFee')
 	group by all;
@@ -758,7 +786,7 @@ FROM ck_analytics_application_ri_wastage_hourly
 WHERE
 extract(month from lineitem_usagestartdate) = #startmonth
 and extract(year from lineitem_usagestartdate) = #startyear
- and bill_payeraccountid in (#payer_ids)
+ and bill_payeraccountid in (#payers_ids)
 and product_name = 'RDS';
 
 
@@ -819,7 +847,7 @@ WHERE
 t.line_item_line_item_type = 'DiscountedUsage' 
 and f.value:key in ('product_name')
 AND f.value:value = 'Amazon ElastiCache'
-and bill_payer_account_id in (#payer_ids)
+and bill_payer_account_id in (#payers_ids)
 group by 1;
 
 
@@ -849,7 +877,7 @@ WITH rifee_data AS (
                             when t.LINE_ITEM_USAGE_TYPE like '%.xl%' then 8
                             when t.LINE_ITEM_USAGE_TYPE like '%.l%'  then 4
                             else line_item_normalization_factor
-                            end as line_item_normalization_factor,
+                            end as nfactor_used,
         case
     		WHEN line_item_operation = 'CreateCacheCluster:0002' THEN 'Redis' 
     		WHEN line_item_operation = 'CreateCacheCluster:0001' THEN 'Memcached' 
@@ -925,10 +953,12 @@ WITH rifee_data AS (
  extract(month from t.line_item_usage_start_date) = #startmonth
 and extract(year from t.line_item_usage_start_date) = #startyear
 	and line_item_line_item_type  in ('RIFee')
+    and bill_payer_account_id in (#payers_ids)
+
 GROUP BY 
     t.reservation_reservation_a_r_n,
     t.LINE_ITEM_USAGE_TYPE,
-    t.line_item_normalization_factor,
+    nfactor_used,
     t.line_item_operation,
     t.bill_payer_account_id,
     t.line_item_usage_account_id
@@ -956,13 +986,22 @@ SELECT
     line_item_line_item_type as lineitem_lineitemtype,
     m.RESERVATION_RESERVATION_A_R_N as RESERVATION_RESERVATIONARN,
     reservation_number_of_reservations as reservation_numberofreservations,
-    SUM(
-        CASE
-            WHEN line_item_line_item_type = 'RIFee' THEN r.line_item_normalization_factor
-            ELSE 0
-        END
-    ) AS lineitem_normalizationfactor,
-    SUM(line_item_normalized_usage_amount) AS lineitem_normalizedusageamount,
+ SUM(
+    CASE 
+        WHEN line_item_line_item_type = 'RIFee' THEN 
+            CASE 
+                WHEN line_item_normalization_factor = 0 or line_item_normalization_factor is null  THEN r.nfactor_used
+                ELSE line_item_normalization_factor
+            END
+        ELSE 0
+    END
+) AS lineitem_normalizationfactor,
+    SUM( case 
+            when line_item_normalized_usage_amount = 0 or line_item_normalized_usage_amount  is null
+            then r.nfactor_used * line_item_usage_amount
+            else line_item_normalized_usage_amount
+            end
+        ) AS lineitem_normalizedusageamount,
     SUM(line_item_unblended_cost) AS lineitem_unblendedcost,
     SUM(reservation_effective_cost) AS reservation_EffectiveCost,
     SUM(
@@ -994,15 +1033,15 @@ FROM
 LEFT JOIN
     payer_billdesk_config.payers b ON b.payer_account_id = m.bill_payer_account_id
 
-JOIN
+LEFT JOIN
     rifee_data r ON 
         r.RESERVATION_RESERVATION_A_R_N = m.RESERVATION_RESERVATION_A_R_N AND
         r.bill_payer_account_id = m.bill_payer_account_id 
 WHERE
    extract(month from m.line_item_usage_start_date) = #startmonth
-   and extract(year from m.line_item_usage_start_date) = #startyear 	
-    and m.bill_payer_account_id in (#payer_ids)
-	and lineitem_lineitemtype  in ('DiscountedUsage','VDiscountedUsage','RIFee')
+   and extract(year from m.line_item_usage_start_date) = #startyear	
+    and m.bill_payer_account_id in (#payers_ids)
+    and lineitem_lineitemtype  in ('DiscountedUsage','VDiscountedUsage','RIFee')
 	group by all;
 
 
@@ -1080,12 +1119,14 @@ where
 	group by all;
 
 
+
+
 DELETE
 FROM ck_analytics_application_ri_wastage_hourly
 WHERE
 extract(month from lineitem_usagestartdate) = #startmonth
 and extract(year from lineitem_usagestartdate) = #startyear
-and bill_payeraccountid in (#payer_ids)
+and bill_payeraccountid in (#payers_ids)
 and product_name = 'ElastiCache';
 
 
@@ -1143,95 +1184,18 @@ WHERE
 t.line_item_line_item_type = 'DiscountedUsage' 
 and f.value:key in ('product_name')
 AND f.value:value in ('Amazon Elasticsearch Service','Amazon OpenSearch Service')
-and bill_payer_account_id in (#payer_ids)
+and bill_payer_account_id in (#payers_ids)
 group by 1;
 
 
-CREATE OR REPLACE TEMPORARY TABLE es_ri_util_report_temp AS 
-select
-    split_part(RESERVATION_RESERVATION_A_R_N, '/', 2) as reservation_id,
-    line_item_usage_start_date as lineitem_usagestartdate,
-	case when line_item_line_item_type = 'RIFee' then 
-	DATEADD(SECOND, 1, line_item_usage_end_date) 
-	else  line_item_usage_end_date end as lineitem_usageenddate,
-    bill_payer_account_id as bill_payeraccountid,    
-	case when line_item_line_item_type = 'Usage' then 
-		line_item_usage_account_id
-	else split_part(RESERVATION_RESERVATION_A_R_N, ':', 5) 
-	end as lineitem_usageaccountid,
-    extract(month from line_item_usage_start_date) as mycloud_startmonth,
-    extract(year from line_item_usage_start_date) as mycloud_startyear,
-    MAX(CASE WHEN f.value:key = 'region' THEN f.value:value::STRING END) AS region_code,
-    MAX(CASE WHEN f.value:key = 'product_name' THEN f.value:value::STRING END) AS product_productname,
-    '' as mycloud_operatingsystem,
-    case
-	WHEN region_code like 'us-east-2%' OR LINE_ITEM_USAGE_TYPE like '%USE2-%' OR LINE_ITEM_USAGE_TYPE like 'us-east-2%'
-	THEN 'Ohio'
-	WHEN region_code like 'us-east-1%'OR LINE_ITEM_USAGE_TYPE like '%USE1-%' OR LINE_ITEM_USAGE_TYPE like 'us-east-1%'
-	THEN 'N. Virginia'
-	WHEN region_code like 'us-west-1%' OR LINE_ITEM_USAGE_TYPE like '%USW1-%' OR LINE_ITEM_USAGE_TYPE like 'us-west-1%'
-	THEN 'N. California'
-	WHEN region_code like 'us-west-2%' OR LINE_ITEM_USAGE_TYPE like '%USW2-%' OR LINE_ITEM_USAGE_TYPE like 'us-west-2%'
-	THEN 'Oregon'
-	WHEN region_code like 'ap-east-1%' OR LINE_ITEM_USAGE_TYPE like '%APE1-%' OR LINE_ITEM_USAGE_TYPE like 'ap-east-1%'
-	THEN 'Hong Kong'
-	WHEN region_code like 'ap-south-1%' OR LINE_ITEM_USAGE_TYPE like '%APS3-%' OR LINE_ITEM_USAGE_TYPE like 'ap-south-1%'
-	THEN 'Mumbai'
-	WHEN region_code like 'ap-northeast-3%' OR LINE_ITEM_USAGE_TYPE like '%APN3-%' OR LINE_ITEM_USAGE_TYPE like 'ap-northeast-3%'
-	THEN 'Osaka'
-	WHEN region_code like 'ap-northeast-2%' OR LINE_ITEM_USAGE_TYPE like '%APN2-%' OR LINE_ITEM_USAGE_TYPE like 'ap-northeast-2%'
-	THEN 'Seoul'
-	WHEN region_code like 'ap-southeast-1%' OR LINE_ITEM_USAGE_TYPE like '%APS1-%' OR LINE_ITEM_USAGE_TYPE like 'ap-southeast-1%'
-	THEN 'Singapore'
-	WHEN region_code like 'ap-southeast-2%' OR LINE_ITEM_USAGE_TYPE like '%APS2-%' OR LINE_ITEM_USAGE_TYPE like 'ap-southeast-2%'
-	THEN 'Sydney'
-	WHEN region_code like 'ap-southeast-3%' OR LINE_ITEM_USAGE_TYPE like '%APS4-%' OR LINE_ITEM_USAGE_TYPE like 'ap-southeast-3%'
-	THEN 'Jakarta'
-	WHEN region_code like 'ap-northeast-1%' OR LINE_ITEM_USAGE_TYPE like '%APN1-%' OR LINE_ITEM_USAGE_TYPE like 'ap-northeast-1%'
-	THEN 'Tokyo'
-	WHEN region_code like 'ca-central-1%' OR LINE_ITEM_USAGE_TYPE like '%CAN1-%' OR LINE_ITEM_USAGE_TYPE like 'ca-central-1%'
-	THEN 'Central'
-	WHEN region_code like 'eu-west-1%' OR LINE_ITEM_USAGE_TYPE like '%EU-%' OR LINE_ITEM_USAGE_TYPE like 'eu-west-1%'
-	THEN 'Ireland'
-	WHEN region_code like 'eu-west-1%' OR LINE_ITEM_USAGE_TYPE like '%EUW1-%' OR LINE_ITEM_USAGE_TYPE like 'eu-west-1%'
-	THEN 'Ireland'
-	WHEN region_code like 'eu-central-1%' OR LINE_ITEM_USAGE_TYPE like '%EUC1-%' OR LINE_ITEM_USAGE_TYPE like 'eu-central-1%'
-	THEN 'Frankfurt'
-	WHEN region_code like 'eu-west-2%' OR LINE_ITEM_USAGE_TYPE like '%EUW2-%' OR LINE_ITEM_USAGE_TYPE like 'eu-west-2%'
-	THEN 'London'
-	WHEN region_code like 'eu-west-3%' OR LINE_ITEM_USAGE_TYPE like '%EUW3-%' OR LINE_ITEM_USAGE_TYPE like 'eu-west-3%'
-	THEN 'Paris'
-	WHEN region_code like 'eu-north-1%' OR LINE_ITEM_USAGE_TYPE like '%EUN1-%' OR LINE_ITEM_USAGE_TYPE like 'eu-north-1%'
-	THEN 'Stockholm'
-	WHEN region_code like 'me-south-1%' OR LINE_ITEM_USAGE_TYPE like '%MES1-%' OR LINE_ITEM_USAGE_TYPE like 'me-south-1%'
-	THEN 'Bahrain'
-	WHEN region_code like 'sa-east-1%' OR LINE_ITEM_USAGE_TYPE like '%SAE1-%' OR LINE_ITEM_USAGE_TYPE like 'sa-east-1%'
-	THEN 'Sao Paulo'
-	WHEN region_code like 'ug-west-1%' OR LINE_ITEM_USAGE_TYPE like '%UGW1-%' OR LINE_ITEM_USAGE_TYPE like 'ug-west-1%'
-	THEN 'GovCloud (US)'
-	WHEN region_code like 'ug-east-1%' OR LINE_ITEM_USAGE_TYPE like '%UGE1-%' OR LINE_ITEM_USAGE_TYPE like 'ug-east-1%'
-	THEN 'GovCloud (US-East)'
-	WHEN region_code like 'af-south-1%' OR LINE_ITEM_USAGE_TYPE like '%AFS1-%' OR LINE_ITEM_USAGE_TYPE like 'af-south-1%'
-	THEN 'Cape Town'
- 	WHEN region_code like 'eu-south-1%' or LINE_ITEM_USAGE_TYPE like '%EUS1-%' or LINE_ITEM_USAGE_TYPE like 'eu-south-1%'
-    THEN 'Milan'
-    WHEN region_code like 'me-central-1%' or LINE_ITEM_USAGE_TYPE like '%MEC1-%' or LINE_ITEM_USAGE_TYPE like 'me-central-1%'
-    THEN 'UAE'
-    WHEN region_code like 'ap-south-2%' or LINE_ITEM_USAGE_TYPE like '%APS2-%' or LINE_ITEM_USAGE_TYPE like 'ap-south-2%'
-    THEN 'Hyderabad'
-	else ''
-	end as mycloud_region,
-    pricing_offering_class AS offering_type,
-    line_item_line_item_type as lineitem_lineitemtype,
-    RESERVATION_RESERVATION_A_R_N as RESERVATION_RESERVATIONARN,
-    reservation_number_of_reservations as reservation_numberofreservations,
-	(case
-            	when line_item_line_item_type in ('RIFee')
-            	then  concat(SPLIT_PART(t.LINE_ITEM_USAGE_TYPE, ':', 2) , '.search')
-            	else concat(SPLIT_PART(t.LINE_ITEM_USAGE_TYPE, ':', 2) , '.search')
-            	end
-    ) as mycloud_instancetype,
-    sum(case when line_item_line_item_type in ('RIFee') then ( case when t.LINE_ITEM_USAGE_TYPE like '%.nano%' then 0.25
+CREATE OR REPLACE TEMPORARY TABLE es_ri_report_hourly_temp AS
+WITH rifee_data AS (
+    SELECT
+        distinct
+         t.reservation_reservation_a_r_n,
+        SPLIT_PART(t.LINE_ITEM_USAGE_TYPE, ':', 2) AS instance_type,
+        case
+         when t.LINE_ITEM_USAGE_TYPE like '%.nano%' then 0.25
                             when t.LINE_ITEM_USAGE_TYPE like '%.micro%'  then 0.5
                             when t.LINE_ITEM_USAGE_TYPE like '%.small%'  then 1
                             when t.LINE_ITEM_USAGE_TYPE like '%.medium%'  then 2
@@ -1250,59 +1214,172 @@ select
                             when t.LINE_ITEM_USAGE_TYPE like '%.xl%' then 8
                             when t.LINE_ITEM_USAGE_TYPE like '%.l%'  then 4
                             else line_item_normalization_factor
-                            end ) else 0 end ) as lineitem_normalizationfactor,
-    sum(line_item_normalized_usage_amount) as lineitem_normalizedusageamount,
-	sum(line_item_usage_amount) as lineitem_usageamount,
-	sum(line_item_unblended_cost) as lineitem_unblendedcost,
-	sum(reservation_effective_cost) as reservation_EffectiveCost,
-	 SUM(
+                            end as nfactor_used,
+       '' mycloud_operatingsystem,
+        instance_type as  MYCLOUD_FAMILY_FLEXIBLE,
+            MAX(CASE WHEN f.value:key = 'region' THEN f.value:value::STRING END) AS region_code,
+                MAX(CASE WHEN f.value:key = 'product_name' THEN f.value:value::STRING END) AS product_productname,
+        	case
+	WHEN region_code like 'us-east-2%' OR LINE_ITEM_USAGE_TYPE like '%USE2-%' 
+	THEN 'Ohio'
+	WHEN region_code like 'us-east-1%'OR LINE_ITEM_USAGE_TYPE like '%USE1-%' 
+	THEN 'N. Virginia'
+	WHEN region_code like 'us-west-1%' OR LINE_ITEM_USAGE_TYPE like '%USW1-%' 
+	THEN 'N. California'
+	WHEN region_code like 'us-west-2%' OR LINE_ITEM_USAGE_TYPE like '%USW2-%' 
+	THEN 'Oregon'
+	WHEN region_code like 'ap-east-1%' OR LINE_ITEM_USAGE_TYPE like '%APE1-%' 
+	THEN 'Hong Kong'
+	WHEN region_code like 'ap-south-1%' OR LINE_ITEM_USAGE_TYPE like '%APS3-%' 
+	THEN 'Mumbai'
+	WHEN region_code like 'ap-northeast-3%' OR LINE_ITEM_USAGE_TYPE like '%APN3-%' 
+	THEN 'Osaka'
+	WHEN region_code like 'ap-northeast-2%' OR LINE_ITEM_USAGE_TYPE like '%APN2-%' 
+	THEN 'Seoul'
+	WHEN region_code like 'ap-southeast-1%' OR LINE_ITEM_USAGE_TYPE like '%APS1-%' 
+	THEN 'Singapore'
+	WHEN region_code like 'ap-southeast-2%' OR LINE_ITEM_USAGE_TYPE like '%APS2-%' 
+	THEN 'Sydney'
+	WHEN region_code like 'ap-southeast-3%' OR LINE_ITEM_USAGE_TYPE like '%APS4-%' 
+	THEN 'Jakarta'
+	WHEN region_code like 'ap-northeast-1%' OR LINE_ITEM_USAGE_TYPE like '%APN1-%' 
+	THEN 'Tokyo'
+	WHEN region_code like 'ca-central-1%' OR LINE_ITEM_USAGE_TYPE like '%CAN1-%' 
+	THEN 'Central'
+	WHEN region_code like 'eu-west-1%' OR LINE_ITEM_USAGE_TYPE like '%EU-%' 
+	THEN 'Ireland'
+	WHEN region_code like 'eu-west-1%' OR LINE_ITEM_USAGE_TYPE like '%EUW1-%' 
+	THEN 'Ireland'
+	WHEN region_code like 'eu-central-1%' OR LINE_ITEM_USAGE_TYPE like '%EUC1-%' 
+	THEN 'Frankfurt'
+	WHEN region_code like 'eu-west-2%' OR LINE_ITEM_USAGE_TYPE like '%EUW2-%' 
+	THEN 'London'
+	WHEN region_code like 'eu-west-3%' OR LINE_ITEM_USAGE_TYPE like '%EUW3-%' 
+	THEN 'Paris'
+	WHEN region_code like 'eu-north-1%' OR LINE_ITEM_USAGE_TYPE like '%EUN1-%' 
+	THEN 'Stockholm'
+	WHEN region_code like 'me-south-1%' OR LINE_ITEM_USAGE_TYPE like '%MES1-%' 
+	THEN 'Bahrain'
+	WHEN region_code like 'sa-east-1%' OR LINE_ITEM_USAGE_TYPE like '%SAE1-%' 
+	THEN 'Sao Paulo'
+	WHEN region_code like 'ug-west-1%' OR LINE_ITEM_USAGE_TYPE like '%UGW1-%' 
+	THEN 'GovCloud (US)'
+	WHEN region_code like 'ug-east-1%' OR LINE_ITEM_USAGE_TYPE like '%UGE1-%' 
+	THEN 'GovCloud (US-East)'
+	WHEN region_code like 'af-south-1%' OR LINE_ITEM_USAGE_TYPE like '%AFS1-%' 
+	THEN 'Cape Town'
+ 	WHEN region_code like 'eu-south-1%' or LINE_ITEM_USAGE_TYPE like '%EUS1-%' 
+    THEN 'Milan'
+    WHEN region_code like 'me-central-1%' or LINE_ITEM_USAGE_TYPE like '%MEC1-%' 
+    THEN 'UAE'
+    WHEN region_code like 'ap-south-2%' or LINE_ITEM_USAGE_TYPE like '%APS2-%' 
+    THEN 'Hyderabad'
+	else ''
+	end as mycloud_region,
+    t.bill_payer_account_id,
+    t.line_item_usage_account_id,
+    FROM
+        analytics_application_table_#startyear_#startmonth t,
+      LATERAL FLATTEN(input => t.product:key_value) f
+
+    WHERE
+ extract(month from t.line_item_usage_start_date) = #startmonth
+and extract(year from t.line_item_usage_start_date) = #startyear
+	and line_item_line_item_type  in ('RIFee')
+    and bill_payer_account_id in (#payers_ids)
+
+GROUP BY 
+    t.reservation_reservation_a_r_n,
+    t.LINE_ITEM_USAGE_TYPE,
+    nfactor_used,
+    t.line_item_operation,
+    t.bill_payer_account_id,
+    t.line_item_usage_account_id
+HAVING MAX(CASE WHEN f.value:key = 'product_name' THEN f.value:value::STRING END) in ('Amazon Elasticsearch Service','Amazon OpenSearch Service')
+	
+)
+
+SELECT
+    SPLIT_PART(m.RESERVATION_RESERVATION_A_R_N, '/', 2) AS reservation_id,
+    line_item_usage_start_date as lineitem_usagestartdate,
+    case when line_item_line_item_type = 'RIFee' then 
+	DATEADD(SECOND, 1, line_item_usage_end_date) 
+	else  line_item_usage_end_date end as lineitem_usageenddate,
+    m.bill_payer_account_id as bill_payeraccountid,
+	b.payer_name,
+    r.line_item_usage_account_id as lineitem_usageaccountid,
+    r.mycloud_family_flexible AS instancetype_family,
+    r.INSTANCE_TYPE as instancetype,
+      extract(month from line_item_usage_start_date) as mycloud_startmonth,
+    extract(year from line_item_usage_start_date) as mycloud_startyear,
+    r.product_productname,
+    r.mycloud_operatingsystem,
+    r.mycloud_region,
+    pricing_offering_class AS offering_type,
+    line_item_line_item_type as lineitem_lineitemtype,
+    m.RESERVATION_RESERVATION_A_R_N as RESERVATION_RESERVATIONARN,
+    reservation_number_of_reservations as reservation_numberofreservations,
+ SUM(
+    CASE 
+        WHEN line_item_line_item_type = 'RIFee' THEN 
+            CASE 
+                WHEN line_item_normalization_factor = 0 or line_item_normalization_factor is null  THEN r.nfactor_used
+                ELSE line_item_normalization_factor
+            END
+        ELSE 0
+    END
+) AS lineitem_normalizationfactor,
+    SUM( case 
+            when line_item_normalized_usage_amount = 0 or line_item_normalized_usage_amount  is null
+            then r.nfactor_used * line_item_usage_amount
+            else line_item_normalized_usage_amount
+            end
+        ) AS lineitem_normalizedusageamount,
+    SUM(line_item_unblended_cost) AS lineitem_unblendedcost,
+    sum(line_item_usage_amount) as lineitem_usageamount,
+
+    SUM(reservation_effective_cost) AS reservation_EffectiveCost,
+    SUM(
         CASE
             WHEN pricing_public_on_demand_cost = 0 THEN 0
             ELSE pricing_public_on_demand_cost::DECIMAL(30,8)
         END
     ) AS mycloud_ondemandprice,
-    sum(case when line_item_line_item_type in ('RIFee') then
-     (    
-         case when line_item_unblended_rate is null  or line_item_unblended_rate = '' then 0
-         else line_item_unblended_rate::real end + 
-         case when DATEDIFF(hour, line_item_usage_start_date, dateadd(second, 2, line_item_usage_end_date)) = 0 then 0 
-        else
-             ( reservation_amortized_upfront_fee_for_billing_period ) /
-            (
-             DATEDIFF(hour, line_item_usage_start_date, dateadd(second, 2, line_item_usage_end_date))
-             * reservation_number_of_reservations
+    SUM(
+        CASE
+            WHEN line_item_line_item_type = 'RIFee' THEN (
+                COALESCE(line_item_unblended_rate::REAL, 0) +
+                CASE
+                    WHEN DATEDIFF(hour, line_item_usage_start_date, DATEADD(second, 2, line_item_usage_end_date)) = 0 THEN 0
+                    ELSE (
+                        reservation_amortized_upfront_fee_for_billing_period /
+                        (
+                            DATEDIFF(hour, line_item_usage_start_date, DATEADD(second, 2, line_item_usage_end_date)) * reservation_number_of_reservations
+                        )
+                    )
+                END
             )
-        end
-     ) 
-  else 0 end) as ri_hourly_effective_cost				 
-from analytics_application_table_#startyear_#startmonth t,
-     LATERAL FLATTEN(input => t.product:key_value) f
+            ELSE 0
+        END
+    ) AS ri_hourly_effective_cost
+FROM
+    analytics_application_table_#startyear_#startmonth  m
+
+LEFT JOIN
+    payer_billdesk_config.payers b ON b.payer_account_id = m.bill_payer_account_id
+
+LEFT JOIN
+    rifee_data r ON 
+        r.RESERVATION_RESERVATION_A_R_N = m.RESERVATION_RESERVATION_A_R_N AND
+        r.bill_payer_account_id = m.bill_payer_account_id 
+WHERE
+   extract(month from m.line_item_usage_start_date) = #startmonth
+   and extract(year from m.line_item_usage_start_date) = #startyear	
+    and m.bill_payer_account_id in (#payers_ids)
+	and lineitem_lineitemtype  in ('DiscountedUsage','VDiscountedUsage','RIFee')
+	group by all;
 
 
-where 
-    extract(month from line_item_usage_start_date) = #startmonth
-   and extract(year from line_item_usage_start_date) = #startyear 
-  	and line_item_line_item_type not in ('Credit','Tax','Refund')
-	and line_item_line_item_type  in ('DiscountedUsage','VDiscountedUsage','RIFee')
-    and bill_payer_account_id in (#payer_ids)
-group by 
-reservation_id,
-lineitem_usagestartdate,
-lineitem_usageenddate,
-bill_payeraccountid,
-lineitem_usageaccountid,
-mycloud_startmonth,
-mycloud_startyear,
-mycloud_operatingsystem,
-t.LINE_ITEM_USAGE_TYPE,
-offering_type,
-lineitem_lineitemtype,
-RESERVATION_RESERVATIONARN,
-reservation_numberofreservations,
-mycloud_instancetype
-HAVING MAX(CASE WHEN f.value:key = 'product_name' THEN f.value:value::STRING END) in ('Amazon Elasticsearch Service','Amazon OpenSearch Service');
-
-;
 
 CREATE OR REPLACE TEMPORARY TABLE es_ri_utilization_report_hourly_temp AS 
  WITH RECURSIVE hourSequence AS (
@@ -1310,7 +1387,7 @@ CREATE OR REPLACE TEMPORARY TABLE es_ri_utilization_report_hourly_temp AS
   UNION ALL
   SELECT seq + 1
   FROM hourSequence
-WHERE seq < 24*DATEDIFF(DAY, date_from_parts(#startyear, #startmonth, 1),dateadd('day',1,last_day(date_from_parts(#startyear , #startmonth,1)))) - 1)
+WHERE seq < 24*DATEDIFF(DAY, date_from_parts(#startyear	, #startmonth, 1),dateadd('day',1,last_day(date_from_parts(#startyear , #startmonth,1)))) - 1)
 select
     RESERVATION_ID,
     bill_payeraccountid,
@@ -1328,7 +1405,7 @@ select
 	mycloud_region as region,
     offering_type,
 	mycloud_operatingsystem as operatingSystem,
-	mycloud_instancetype as instanceType,
+	instancetype as instanceType,
     sum(lineitem_normalizationfactor) as NFapplied,
 	coalesce(sum(mycloud_ondemandprice), 0) as onDemandCost,
     sum(case when lineitem_lineitemtype in('RIFee') then reservation_numberofreservations*(DATEDIFF(hour, greatest(lineitem_usagestartdate, cast(startDate as timestamp) ), dateadd(second, 2, least(lineitem_usageenddate, cast(endDate as timestamp))) )) else 0 end) as reservedHours,
@@ -1350,7 +1427,7 @@ sum(case when lineitem_lineitemtype in ('DiscountedUsage', 'VDiscountedUsage')
 		else 0 end)*reservedHours as netSavings,
 	sum(case when(lineitem_lineitemtype in('DiscountedUsage', 'VDiscountedUsage') and lineitem_usagestartdate>= cast(startDate as timestamp) and lineitem_usagestartdate<= cast(endDate as timestamp) ) then lineitem_usageamount else 0 end) as usedHours
 from
-	es_ri_util_report_temp a2
+	es_ri_report_hourly_temp a2
     LEFT JOIN
     payer_billdesk_config.payers b ON b.payer_account_id = a2.bill_payeraccountid
 	cross join hourSequence wtp
@@ -1381,13 +1458,12 @@ group by all;
 
 
 
-
 DELETE
 FROM ck_analytics_application_ri_wastage_hourly
 WHERE
 extract(month from lineitem_usagestartdate) = #startmonth
 and extract(year from lineitem_usagestartdate) = #startyear
-and bill_payeraccountid in (#payer_ids)
+and bill_payeraccountid in  (#payers_ids)
 and product_name = 'OpenSearch';
 
     
@@ -1446,94 +1522,18 @@ WHERE
 t.line_item_line_item_type = 'DiscountedUsage' 
 and f.value:key in ('product_name')
 AND f.value:value in ('Amazon Redshift')
-and bill_payer_account_id in (#payer_ids)
+and bill_payer_account_id in (#payers_ids)
 group by 1;
 
 
-
-CREATE OR REPLACE TEMPORARY TABLE redshift_ri_util_report_temp AS 
-select
-    split_part(RESERVATION_RESERVATION_A_R_N, '/', 2) as reservation_id,
-    line_item_usage_start_date as lineitem_usagestartdate,
-	case when line_item_line_item_type = 'RIFee' then 
-	DATEADD(SECOND, 1, line_item_usage_end_date) 
-	else  line_item_usage_end_date end as lineitem_usageenddate,
-    bill_payer_account_id as bill_payeraccountid,    
-         
-	case when line_item_line_item_type = 'Usage' then 
-				line_item_usage_account_id
-
-	else split_part(RESERVATION_RESERVATION_A_R_N, ':', 5) 
-	end as lineitem_usageaccountid,
-     extract(month from line_item_usage_start_date) as mycloud_startmonth,
-    extract(year from line_item_usage_start_date) as mycloud_startyear,
-        MAX(CASE WHEN f.value:key = 'region' THEN f.value:value::STRING END) AS region_code,
-    MAX(CASE WHEN f.value:key = 'product_name' THEN f.value:value::STRING END) AS product_productname,
-
-    '' as mycloud_operatingsystem,
-      case
-	WHEN region_code like 'us-east-2%' OR LINE_ITEM_USAGE_TYPE like '%USE2-%' OR LINE_ITEM_USAGE_TYPE like 'us-east-2%'
-	THEN 'Ohio'
-	WHEN region_code like 'us-east-1%'OR LINE_ITEM_USAGE_TYPE like '%USE1-%' OR LINE_ITEM_USAGE_TYPE like 'us-east-1%'
-	THEN 'N. Virginia'
-	WHEN region_code like 'us-west-1%' OR LINE_ITEM_USAGE_TYPE like '%USW1-%' OR LINE_ITEM_USAGE_TYPE like 'us-west-1%'
-	THEN 'N. California'
-	WHEN region_code like 'us-west-2%' OR LINE_ITEM_USAGE_TYPE like '%USW2-%' OR LINE_ITEM_USAGE_TYPE like 'us-west-2%'
-	THEN 'Oregon'
-	WHEN region_code like 'ap-east-1%' OR LINE_ITEM_USAGE_TYPE like '%APE1-%' OR LINE_ITEM_USAGE_TYPE like 'ap-east-1%'
-	THEN 'Hong Kong'
-	WHEN region_code like 'ap-south-1%' OR LINE_ITEM_USAGE_TYPE like '%APS3-%' OR LINE_ITEM_USAGE_TYPE like 'ap-south-1%'
-	THEN 'Mumbai'
-	WHEN region_code like 'ap-northeast-3%' OR LINE_ITEM_USAGE_TYPE like '%APN3-%' OR LINE_ITEM_USAGE_TYPE like 'ap-northeast-3%'
-	THEN 'Osaka'
-	WHEN region_code like 'ap-northeast-2%' OR LINE_ITEM_USAGE_TYPE like '%APN2-%' OR LINE_ITEM_USAGE_TYPE like 'ap-northeast-2%'
-	THEN 'Seoul'
-	WHEN region_code like 'ap-southeast-1%' OR LINE_ITEM_USAGE_TYPE like '%APS1-%' OR LINE_ITEM_USAGE_TYPE like 'ap-southeast-1%'
-	THEN 'Singapore'
-	WHEN region_code like 'ap-southeast-2%' OR LINE_ITEM_USAGE_TYPE like '%APS2-%' OR LINE_ITEM_USAGE_TYPE like 'ap-southeast-2%'
-	THEN 'Sydney'
-	WHEN region_code like 'ap-southeast-3%' OR LINE_ITEM_USAGE_TYPE like '%APS4-%' OR LINE_ITEM_USAGE_TYPE like 'ap-southeast-3%'
-	THEN 'Jakarta'
-	WHEN region_code like 'ap-northeast-1%' OR LINE_ITEM_USAGE_TYPE like '%APN1-%' OR LINE_ITEM_USAGE_TYPE like 'ap-northeast-1%'
-	THEN 'Tokyo'
-	WHEN region_code like 'ca-central-1%' OR LINE_ITEM_USAGE_TYPE like '%CAN1-%' OR LINE_ITEM_USAGE_TYPE like 'ca-central-1%'
-	THEN 'Central'
-	WHEN region_code like 'eu-west-1%' OR LINE_ITEM_USAGE_TYPE like '%EU-%' OR LINE_ITEM_USAGE_TYPE like 'eu-west-1%'
-	THEN 'Ireland'
-	WHEN region_code like 'eu-west-1%' OR LINE_ITEM_USAGE_TYPE like '%EUW1-%' OR LINE_ITEM_USAGE_TYPE like 'eu-west-1%'
-	THEN 'Ireland'
-	WHEN region_code like 'eu-central-1%' OR LINE_ITEM_USAGE_TYPE like '%EUC1-%' OR LINE_ITEM_USAGE_TYPE like 'eu-central-1%'
-	THEN 'Frankfurt'
-	WHEN region_code like 'eu-west-2%' OR LINE_ITEM_USAGE_TYPE like '%EUW2-%' OR LINE_ITEM_USAGE_TYPE like 'eu-west-2%'
-	THEN 'London'
-	WHEN region_code like 'eu-west-3%' OR LINE_ITEM_USAGE_TYPE like '%EUW3-%' OR LINE_ITEM_USAGE_TYPE like 'eu-west-3%'
-	THEN 'Paris'
-	WHEN region_code like 'eu-north-1%' OR LINE_ITEM_USAGE_TYPE like '%EUN1-%' OR LINE_ITEM_USAGE_TYPE like 'eu-north-1%'
-	THEN 'Stockholm'
-	WHEN region_code like 'me-south-1%' OR LINE_ITEM_USAGE_TYPE like '%MES1-%' OR LINE_ITEM_USAGE_TYPE like 'me-south-1%'
-	THEN 'Bahrain'
-	WHEN region_code like 'sa-east-1%' OR LINE_ITEM_USAGE_TYPE like '%SAE1-%' OR LINE_ITEM_USAGE_TYPE like 'sa-east-1%'
-	THEN 'Sao Paulo'
-	WHEN region_code like 'ug-west-1%' OR LINE_ITEM_USAGE_TYPE like '%UGW1-%' OR LINE_ITEM_USAGE_TYPE like 'ug-west-1%'
-	THEN 'GovCloud (US)'
-	WHEN region_code like 'ug-east-1%' OR LINE_ITEM_USAGE_TYPE like '%UGE1-%' OR LINE_ITEM_USAGE_TYPE like 'ug-east-1%'
-	THEN 'GovCloud (US-East)'
-	WHEN region_code like 'af-south-1%' OR LINE_ITEM_USAGE_TYPE like '%AFS1-%' OR LINE_ITEM_USAGE_TYPE like 'af-south-1%'
-	THEN 'Cape Town'
- 	WHEN region_code like 'eu-south-1%' or LINE_ITEM_USAGE_TYPE like '%EUS1-%' or LINE_ITEM_USAGE_TYPE like 'eu-south-1%'
-    THEN 'Milan'
-    WHEN region_code like 'me-central-1%' or LINE_ITEM_USAGE_TYPE like '%MEC1-%' or LINE_ITEM_USAGE_TYPE like 'me-central-1%'
-    THEN 'UAE'
-    WHEN region_code like 'ap-south-2%' or LINE_ITEM_USAGE_TYPE like '%APS2-%' or LINE_ITEM_USAGE_TYPE like 'ap-south-2%'
-    THEN 'Hyderabad'
-	else ''
-	end as mycloud_region,
-    pricing_offering_class AS offering_type,
-    line_item_line_item_type as lineitem_lineitemtype,
-    RESERVATION_RESERVATION_A_R_N as RESERVATION_RESERVATIONARN,
-    reservation_number_of_reservations as reservation_numberofreservations,
-	SPLIT_PART(t.LINE_ITEM_USAGE_TYPE, ':', 2) as INSTANCETYPE_FAMILY,
-    sum(case when line_item_line_item_type in ('RIFee') then (case when t.LINE_ITEM_USAGE_TYPE like '%.nano%' then 0.25
+CREATE OR REPLACE TEMPORARY TABLE redshift_ri_util_report_temp AS
+WITH rifee_data AS (
+    SELECT
+        distinct
+         t.reservation_reservation_a_r_n,
+        SPLIT_PART(t.LINE_ITEM_USAGE_TYPE, ':', 2) AS instance_type,
+        case
+         when t.LINE_ITEM_USAGE_TYPE like '%.nano%' then 0.25
                             when t.LINE_ITEM_USAGE_TYPE like '%.micro%'  then 0.5
                             when t.LINE_ITEM_USAGE_TYPE like '%.small%'  then 1
                             when t.LINE_ITEM_USAGE_TYPE like '%.medium%'  then 2
@@ -1552,57 +1552,171 @@ select
                             when t.LINE_ITEM_USAGE_TYPE like '%.xl%' then 8
                             when t.LINE_ITEM_USAGE_TYPE like '%.l%'  then 4
                             else line_item_normalization_factor
-                            end ) else 0 end ) as lineitem_normalizationfactor,
-    sum(line_item_normalized_usage_amount) as lineitem_normalizedusageamount,
-	sum(line_item_usage_amount) as lineitem_usageamount,
-	sum(line_item_unblended_cost) as lineitem_unblendedcost,
-	sum(reservation_effective_cost) as reservation_EffectiveCost,
-	 SUM(
+                            end as nfactor_used,
+       '' mycloud_operatingsystem,
+        instance_type as  MYCLOUD_FAMILY_FLEXIBLE,
+            MAX(CASE WHEN f.value:key = 'region' THEN f.value:value::STRING END) AS region_code,
+                MAX(CASE WHEN f.value:key = 'product_name' THEN f.value:value::STRING END) AS product_productname,
+        	case
+	WHEN region_code like 'us-east-2%' OR LINE_ITEM_USAGE_TYPE like '%USE2-%' 
+	THEN 'Ohio'
+	WHEN region_code like 'us-east-1%'OR LINE_ITEM_USAGE_TYPE like '%USE1-%' 
+	THEN 'N. Virginia'
+	WHEN region_code like 'us-west-1%' OR LINE_ITEM_USAGE_TYPE like '%USW1-%' 
+	THEN 'N. California'
+	WHEN region_code like 'us-west-2%' OR LINE_ITEM_USAGE_TYPE like '%USW2-%' 
+	THEN 'Oregon'
+	WHEN region_code like 'ap-east-1%' OR LINE_ITEM_USAGE_TYPE like '%APE1-%' 
+	THEN 'Hong Kong'
+	WHEN region_code like 'ap-south-1%' OR LINE_ITEM_USAGE_TYPE like '%APS3-%' 
+	THEN 'Mumbai'
+	WHEN region_code like 'ap-northeast-3%' OR LINE_ITEM_USAGE_TYPE like '%APN3-%' 
+	THEN 'Osaka'
+	WHEN region_code like 'ap-northeast-2%' OR LINE_ITEM_USAGE_TYPE like '%APN2-%' 
+	THEN 'Seoul'
+	WHEN region_code like 'ap-southeast-1%' OR LINE_ITEM_USAGE_TYPE like '%APS1-%' 
+	THEN 'Singapore'
+	WHEN region_code like 'ap-southeast-2%' OR LINE_ITEM_USAGE_TYPE like '%APS2-%' 
+	THEN 'Sydney'
+	WHEN region_code like 'ap-southeast-3%' OR LINE_ITEM_USAGE_TYPE like '%APS4-%' 
+	THEN 'Jakarta'
+	WHEN region_code like 'ap-northeast-1%' OR LINE_ITEM_USAGE_TYPE like '%APN1-%' 
+	THEN 'Tokyo'
+	WHEN region_code like 'ca-central-1%' OR LINE_ITEM_USAGE_TYPE like '%CAN1-%' 
+	THEN 'Central'
+	WHEN region_code like 'eu-west-1%' OR LINE_ITEM_USAGE_TYPE like '%EU-%' 
+	THEN 'Ireland'
+	WHEN region_code like 'eu-west-1%' OR LINE_ITEM_USAGE_TYPE like '%EUW1-%' 
+	THEN 'Ireland'
+	WHEN region_code like 'eu-central-1%' OR LINE_ITEM_USAGE_TYPE like '%EUC1-%' 
+	THEN 'Frankfurt'
+	WHEN region_code like 'eu-west-2%' OR LINE_ITEM_USAGE_TYPE like '%EUW2-%' 
+	THEN 'London'
+	WHEN region_code like 'eu-west-3%' OR LINE_ITEM_USAGE_TYPE like '%EUW3-%' 
+	THEN 'Paris'
+	WHEN region_code like 'eu-north-1%' OR LINE_ITEM_USAGE_TYPE like '%EUN1-%' 
+	THEN 'Stockholm'
+	WHEN region_code like 'me-south-1%' OR LINE_ITEM_USAGE_TYPE like '%MES1-%' 
+	THEN 'Bahrain'
+	WHEN region_code like 'sa-east-1%' OR LINE_ITEM_USAGE_TYPE like '%SAE1-%' 
+	THEN 'Sao Paulo'
+	WHEN region_code like 'ug-west-1%' OR LINE_ITEM_USAGE_TYPE like '%UGW1-%' 
+	THEN 'GovCloud (US)'
+	WHEN region_code like 'ug-east-1%' OR LINE_ITEM_USAGE_TYPE like '%UGE1-%' 
+	THEN 'GovCloud (US-East)'
+	WHEN region_code like 'af-south-1%' OR LINE_ITEM_USAGE_TYPE like '%AFS1-%' 
+	THEN 'Cape Town'
+ 	WHEN region_code like 'eu-south-1%' or LINE_ITEM_USAGE_TYPE like '%EUS1-%' 
+    THEN 'Milan'
+    WHEN region_code like 'me-central-1%' or LINE_ITEM_USAGE_TYPE like '%MEC1-%' 
+    THEN 'UAE'
+    WHEN region_code like 'ap-south-2%' or LINE_ITEM_USAGE_TYPE like '%APS2-%' 
+    THEN 'Hyderabad'
+	else ''
+	end as mycloud_region,
+    t.bill_payer_account_id,
+    t.line_item_usage_account_id,
+    FROM
+        analytics_application_table_#startyear_#startmonth t,
+      LATERAL FLATTEN(input => t.product:key_value) f
+
+    WHERE
+ extract(month from t.line_item_usage_start_date) = #startmonth
+and extract(year from t.line_item_usage_start_date) = #startyear
+	and line_item_line_item_type  in ('RIFee')
+    and bill_payer_account_id in (#payers_ids)
+
+GROUP BY 
+    t.reservation_reservation_a_r_n,
+    t.LINE_ITEM_USAGE_TYPE,
+    nfactor_used,
+    t.line_item_operation,
+    t.bill_payer_account_id,
+    t.line_item_usage_account_id
+HAVING MAX(CASE WHEN f.value:key = 'product_name' THEN f.value:value::STRING END) = 'Amazon Redshift'
+	
+)
+
+SELECT
+    SPLIT_PART(m.RESERVATION_RESERVATION_A_R_N, '/', 2) AS reservation_id,
+    line_item_usage_start_date as lineitem_usagestartdate,
+    case when line_item_line_item_type = 'RIFee' then 
+	DATEADD(SECOND, 1, line_item_usage_end_date) 
+	else  line_item_usage_end_date end as lineitem_usageenddate,
+    m.bill_payer_account_id as bill_payeraccountid,
+	b.payer_name,
+    r.line_item_usage_account_id as lineitem_usageaccountid,
+    r.mycloud_family_flexible AS instancetype_family,
+    r.INSTANCE_TYPE as instancetype,
+      extract(month from line_item_usage_start_date) as mycloud_startmonth,
+    extract(year from line_item_usage_start_date) as mycloud_startyear,
+    r.product_productname,
+    r.mycloud_operatingsystem,
+    r.mycloud_region,
+    pricing_offering_class AS offering_type,
+    line_item_line_item_type as lineitem_lineitemtype,
+    m.RESERVATION_RESERVATION_A_R_N as RESERVATION_RESERVATIONARN,
+    reservation_number_of_reservations as reservation_numberofreservations,
+ SUM(
+    CASE 
+        WHEN line_item_line_item_type = 'RIFee' THEN 
+            CASE 
+                WHEN line_item_normalization_factor = 0 or line_item_normalization_factor is null  THEN r.nfactor_used
+                ELSE line_item_normalization_factor
+            END
+        ELSE 0
+    END
+) AS lineitem_normalizationfactor,
+    SUM( case 
+            when line_item_normalized_usage_amount = 0 or line_item_normalized_usage_amount  is null
+            then r.nfactor_used * line_item_usage_amount
+            else line_item_normalized_usage_amount
+            end
+        ) AS lineitem_normalizedusageamount,
+    SUM(line_item_unblended_cost) AS lineitem_unblendedcost,
+    sum(line_item_usage_amount) as lineitem_usageamount,
+
+    SUM(reservation_effective_cost) AS reservation_EffectiveCost,
+    SUM(
         CASE
             WHEN pricing_public_on_demand_cost = 0 THEN 0
             ELSE pricing_public_on_demand_cost::DECIMAL(30,8)
         END
     ) AS mycloud_ondemandprice,
-    sum(case when line_item_line_item_type in ('RIFee') then
-     (    
-         case when line_item_unblended_rate is null  or line_item_unblended_rate = '' then 0
-         else line_item_unblended_rate::real end + 
-         case when DATEDIFF(hour, line_item_usage_start_date, dateadd(second, 2, line_item_usage_end_date)) = 0 then 0 
-        else
-             ( reservation_amortized_upfront_fee_for_billing_period ) /
-            (
-             DATEDIFF(hour, line_item_usage_start_date, dateadd(second, 2, line_item_usage_end_date))
-             * reservation_number_of_reservations
+    SUM(
+        CASE
+            WHEN line_item_line_item_type = 'RIFee' THEN (
+                COALESCE(line_item_unblended_rate::REAL, 0) +
+                CASE
+                    WHEN DATEDIFF(hour, line_item_usage_start_date, DATEADD(second, 2, line_item_usage_end_date)) = 0 THEN 0
+                    ELSE (
+                        reservation_amortized_upfront_fee_for_billing_period /
+                        (
+                            DATEDIFF(hour, line_item_usage_start_date, DATEADD(second, 2, line_item_usage_end_date)) * reservation_number_of_reservations
+                        )
+                    )
+                END
             )
-        end
-     ) 
-  else 0 end) as ri_hourly_effective_cost				 
-from  analytics_application_table_#startyear_#startmonth t,
-   LATERAL FLATTEN(input => t.product:key_value) f
+            ELSE 0
+        END
+    ) AS ri_hourly_effective_cost
+FROM
+    analytics_application_table_#startyear_#startmonth  m
 
+LEFT JOIN
+    payer_billdesk_config.payers b ON b.payer_account_id = m.bill_payer_account_id
 
-where 
-    extract(month from line_item_usage_start_date) = #startmonth
-   and extract(year from line_item_usage_start_date) = #startyear 
-  	and line_item_line_item_type not in ('Credit','Tax','Refund')
-	and line_item_line_item_type  in ('DiscountedUsage','VDiscountedUsage','RIFee')
-    and bill_payer_account_id in (#payer_ids)
-group by 
-reservation_id,
-lineitem_usagestartdate,
-lineitem_usageenddate,
-bill_payeraccountid,
-lineitem_usageaccountid,
-mycloud_startmonth,
-mycloud_startyear,
-mycloud_operatingsystem,
-t.LINE_ITEM_USAGE_TYPE,
-offering_type,
-lineitem_lineitemtype,
-RESERVATION_RESERVATIONARN,
-reservation_numberofreservations,
-INSTANCETYPE_FAMILY
-HAVING MAX(CASE WHEN f.value:key = 'product_name' THEN f.value:value::STRING END) = 'Amazon Redshift';
+LEFT JOIN
+    rifee_data r ON 
+        r.RESERVATION_RESERVATION_A_R_N = m.RESERVATION_RESERVATION_A_R_N AND
+        r.bill_payer_account_id = m.bill_payer_account_id 
+WHERE
+   extract(month from m.line_item_usage_start_date) = #startmonth
+   and extract(year from m.line_item_usage_start_date) = #startyear 	
+    and m.bill_payer_account_id in (#payers_ids)
+	and lineitem_lineitemtype  in ('DiscountedUsage','VDiscountedUsage','RIFee')
+	group by all;
+
 
 
 CREATE OR REPLACE TEMPORARY TABLE redshift_ri_utilization_report_hourly_temp AS 
@@ -1686,7 +1800,7 @@ FROM ck_analytics_application_ri_wastage_hourly
 WHERE
 extract(month from lineitem_usagestartdate) = #startmonth
 and extract(year from lineitem_usagestartdate) = #startyear
-and bill_payeraccountid in (#payer_ids)
+and bill_payeraccountid in (#payers_ids)
 and product_name = 'Redshift';
 
     
@@ -1801,6 +1915,5 @@ unused_units = (case
                                 else UNUSED_NU/NFAPPLIED
                                 end )
 where mycloud_startmonth = #startmonth and mycloud_startyear = #startyear;
-
 
 end;

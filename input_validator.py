@@ -4,8 +4,7 @@ import json
 import logging
 from typing import Dict, Any, Optional
 
-from config import STAGING_BUCKET, DEFAULT_APP, DEFAULT_PROCESSING_MODE, DEFAULT_ENVIRONMENT
-
+from config import DEFAULT_APP, DEFAULT_PROCESSING_MODE, DEFAULT_ENVIRONMENT, DEFAULT_MODULE
 logger = logging.getLogger(__name__)
 
 class InputReader:
@@ -68,8 +67,8 @@ class InputValidator:
 
         try:
             year = int(json_data['year'])
-            if not 2020 <= year <= 2030:
-                raise ValueError("Year must be between 2020 and 2030")
+            if not 2020 <= year <= 2035: # Increased range
+                raise ValueError("Year must be between 2020 and 2035")
 
             month = int(json_data['month'])
             if not 1 <= month <= 12:
@@ -91,7 +90,7 @@ class InputValidator:
                 'partner_id': partner_id,
                 'environment': environment,
                 'module': module,
-                'staging_bucket': STAGING_BUCKET,
+                # Staging bucket is now determined by get_environment_config, not hardcoded here
                 'app': DEFAULT_APP,
                 'processing_mode': DEFAULT_PROCESSING_MODE
             }
@@ -112,13 +111,13 @@ class ParameterProcessor:
         # Try primary method: A single JSON object in an environment variable
         json_data = InputReader.read_json_input()
         if json_data:
-            logger.info("📋 Using JSON input method (Primary).")
+            logger.info(" Using JSON input method (Primary).")
             return InputValidator.validate_and_normalize(json_data)
 
         # Try fallback method: Individual environment variables
         json_data = InputReader.construct_from_individual_env_vars()
         if json_data:
-            logger.info("📋 Using individual environment variables (Fallback).")
+            logger.info(" Using individual environment variables (Fallback).")
             return InputValidator.validate_and_normalize(json_data)
 
         raise ValueError("No valid input parameters found from any source. Please set TASK_INPUT_JSON.")

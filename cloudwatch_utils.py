@@ -15,6 +15,7 @@ class CloudWatchMetrics:
     """CloudWatch metrics handler"""
     
     def __init__(self, region_name: Optional[str] = None):
+        # Region can be set by the Fargate task's region or passed in
         self.region = region_name or CLOUDWATCH_CONFIG['region']
         self.namespace = CLOUDWATCH_CONFIG['namespace']
         self.cloudwatch = None
@@ -76,15 +77,13 @@ class CloudWatchMetrics:
     
     def send_file_processing_metrics(self, files_copied: int, files_failed: int, payer_count: int):
         """Send file processing metrics"""
-        dimensions = {
-            'PayerCount': str(payer_count)
-        }
+        # PayerCount is not a great dimension as it can have high cardinality.
+        # Sending it as a separate metric is better.
         
-        # Send multiple metrics
         success = True
-        success &= self.send_metric('FilesCopied', files_copied, dimensions)
-        success &= self.send_metric('FilesFailed', files_failed, dimensions)
-        success &= self.send_metric('PayersProcessed', payer_count, dimensions)
+        success &= self.send_metric('FilesCopied', files_copied)
+        success &= self.send_metric('FilesFailed', files_failed)
+        success &= self.send_metric('PayersProcessed', payer_count)
         
         return success
     
@@ -98,7 +97,7 @@ class CloudWatchMetrics:
         
         return self.send_metric('ProcessingError', 1, dimensions)
 
-# Global instance for easy access
+# Global instance for easy access, region is determined by environment
 cloudwatch_metrics = CloudWatchMetrics()
 
 # Convenience functions

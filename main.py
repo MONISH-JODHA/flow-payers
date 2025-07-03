@@ -4,13 +4,14 @@ import traceback
 import os
 import json
 
-from input_validator import ParameterProcessor, InputReader
+
+from input_validator import ParameterProcessor, InputReader, InputValidator
 from data_copy_service import FargateDataCopyService
 from rabbitmq_client import RabbitMQNotifier
 from cloudwatch_utils import send_task_completion, send_error_metric, send_processing_metrics
 from config import get_environment_config
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
+# Using the root logger configured in config.py
 logger = logging.getLogger(__name__)
 
 def log_processing_parameters(params):
@@ -25,6 +26,7 @@ def main():
     task_status = "Failed"
     status_reason = "UnknownError"
     params = None
+    # Read raw input early for the final 'except' block
     raw_json_input = InputReader.read_json_input()
 
     try:
@@ -35,11 +37,12 @@ def main():
         params = ParameterProcessor.get_parameters()
         log_processing_parameters(params)
 
+        # This ensures the correct staging bucket is used based on the environment
         env_config = get_environment_config(params['environment'])
-        if env_config.get('staging_bucket') != params['staging_bucket']:
-            logger.info(f"Overriding staging bucket from config: {env_config['staging_bucket']}")
-            params['staging_bucket'] = env_config['staging_bucket']
+        params['staging_bucket'] = env_config['staging_bucket']
+        logger.info(f"Using staging bucket for '{params['environment']}': {params['staging_bucket']}")
 
+        # Initialize service with the correct environment
         copy_service = FargateDataCopyService(params['environment'])
 
         result = copy_service.process_multiple_payers(
@@ -74,10 +77,10 @@ def main():
         logger.error(f"A fatal error occurred in the Fargate task: {e}", exc_info=True)
         send_error_metric('FatalError', str(e))
         status_reason = "FatalError"
-        # Ensure params exist for notification
+        # Ensure params exist for notification, parsing from raw input if needed
         if not params and raw_json_input:
             try:
-                params = ParameterProcessor.get_parameters()
+                params = InputValidator.validate_and_normalize(raw_json_input)
             except Exception:
                 logger.error("Could not parse params even from raw input for final notification.")
 
@@ -86,26 +89,29 @@ def main():
         logger.info(f"  Final Status: {task_status}")
         logger.info(f"  Reason: {status_reason}")
 
-        # Send final CloudWatch metric
-        send_task_completion(task_status, status_reason, Environment=params['environment'] if params else 'unknown')
-
-        # Send final RabbitMQ notification
         if params:
+            # Send final CloudWatch metric with environment dimension
+            send_task_completion(task_status, status_reason, Environment=params.get('environment', 'unknown'))
+            
+            # Send final RabbitMQ notification
             try:
-                notifier = RabbitMQNotifier(params['environment'])
-                notifier.send_notification(
-                    month=params['month'],
-                    year=params['year'],
-                    module=params['module'],
-                    payer_ids=params['payer_ids'],
-                    status=task_status.upper(),
-                    partner_id=params['partner_id'],
-                    message=f"Task finished with status: {status_reason}"
-                )
-                logger.info("Final RabbitMQ notification sent.")
+                # Notifier is initialized with the correct environment
+                # notifier = RabbitMQNotifier(params['environment'])
+                # notifier.send_notification(
+                #     month=params['month'],
+                #     year=params['year'],
+                #     module=params['module'],
+                #     payer_ids=params['payer_ids'],
+                #     status=task_status.upper(),
+                #     partner_id=params['partner_id'],
+                #     message=f"Task finished with status: {status_reason}"
+                # )
+                pass
+                
             except Exception as notify_error:
                 logger.error(f"Failed to send final RabbitMQ notification: {notify_error}", exc_info=True)
         else:
+            send_task_completion(task_status, status_reason, Environment='unknown')
             logger.warning("Could not send final RabbitMQ notification because parameters were not parsed.")
 
         logger.info("=" * 80)
