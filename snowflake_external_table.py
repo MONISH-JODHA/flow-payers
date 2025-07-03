@@ -181,62 +181,50 @@ class SnowflakeExternalTableManager:
         STORAGE_INTEGRATION = {storage_integration}
         FILE_FORMAT = (TYPE = 'PARQUET', COMPRESSION = 'SNAPPY');
         """
+
+        logger.info(f"stage_query: {create_stage_query}")
         logger.info(f"Creating analytics stage '{stage_name}' with URL: {stage_url}")
         self.cursor.execute(create_stage_query)
         logger.info("Analytics stage created successfully.")
 
-        file_format_name = 'parquet_format_for_inference'
-        self.cursor.execute(f"CREATE OR REPLACE FILE FORMAT {file_format_name} TYPE = 'PARQUET'")
         
-        infer_schema_query = f"""
-        SELECT COLUMN_NAME, TYPE, EXPRESSION
-        FROM TABLE(
-            INFER_SCHEMA(
-                LOCATION => '@{stage_name}',
-                FILE_FORMAT => '{file_format_name}'
-            )
-        );
-        """
+        query = f'''SELECT COLUMN_NAME,TYPE,EXPRESSION,COLUMN_NAME || ' ' || TYPE || ' AS ' || '(' || EXPRESSION || ')' FROM TABLE(
+                                INFER_SCHEMA(
+                                LOCATION=> '@{stage_name}',
+                                file_format => 'parquet_working_format'
+                                                ));'''
+
+
+        self.cursor.execute(query)
+        cur_schema: list = self.cursor.fetchall()
+        cur_columns: list = [x[3].lower() for x in cur_schema]
+
+        logger.info(f"query stage name: {query}")
+
+
         logger.info("🔍 Inferring schema from Parquet files...")
-        self.cursor.execute(infer_schema_query)
-        schema_results = self.cursor.fetchall()
-
-        if not schema_results:
-            logger.error(f"Could not infer schema from stage '{stage_name}'. The S3 path might be empty or inaccessible.")
-            raise ValueError("Schema inference failed: No files found or accessible in the stage.")
-
-        # --- THIS IS THE FIX ---
-        # We must build the full "column_name data_type AS (expression)" for each column.
-        # This is the correct and robust syntax for creating an external table from INFER_SCHEMA results.
-        column_definitions = []
-        for row in schema_results:
-            col_name = row[0]
-            col_type = row[1]
-            expression = row[2]
-            # Always quote the column name to handle special characters or reserved words
-            definition = f'"{col_name}" {col_type} AS ({expression})'
-            column_definitions.append(definition)
-        
-        columns_result_str = ",\n".join(column_definitions)
-        logger.info(f"Schema inferred with {len(column_definitions)} columns.")
-        # --- FIX ENDS ---
+        columns_result: str = ", ".join(cur_columns)
 
         table_name = f"analytics_application_table_{year}_{month}"
-        create_external_table_query = f"""
-        CREATE OR REPLACE EXTERNAL TABLE {table_name} (
-            {columns_result_str}
-        )
-        LOCATION = @{stage_name}
-        AUTO_REFRESH = false
-        FILE_FORMAT = (TYPE = 'PARQUET');
-        """
-        logger.info(f"Creating external table: {table_name}")
-        self.cursor.execute(create_external_table_query)
+        create_external_table = f'''CREATE OR REPLACE EXTERNAL TABLE {table_name}
+                                ({columns_result})
+                                LOCATION = @{stage_name},
+                                FILE_FORMAT = (TYPE = 'PARQUET' COMPRESSION = 'SNAPPY');'''
+        
+        self.cursor.execute(create_external_table)
+
+
+
+
+
+
+
+        logger.info(f"Creating external table: {create_external_table}")
+        # self.cursor.execute(create_external_table)
         logger.info(f"External table '{table_name}' created successfully with inferred schema.")
 
         logger.info(f"Refreshing external table: {table_name}")
-        self.cursor.execute(f"ALTER EXTERNAL TABLE {table_name} REFRESH")
-        
+
         self._run_analytics_queries(year, month, payer_ids)
 
     def _run_analytics_queries(self, year: int, month: int, payer_ids: List[str]):
