@@ -46,62 +46,73 @@ VHOST_MAPPING = {
     'dev2': 'dev2',
     'uat': 'cloudonomic_uat',
     'qa1': 'qa1',
-    'prod': 'cloudonomic_prod' 
+    'prod': 'cloudonomic_prod'
 }
 
-# Payer Configurations
+# --- FALLBACK Payer Configurations ---
+# These are used ONLY if fetching from Snowflake fails.
 PAYER_CONFIGS = {
     "671238551718": {
-                "name": "1mg",
-                "bucket": "aws-1mg-edp-parquet-cur-nonprod",
-                "path": "1mg-edp/cur-hourly-athena-data-export-1mg-edp/data",
-                "access_type": "SAME_ACCOUNT"
-            },
-            "519933445287": {  # AISPL-2
-                "name": "aispl-2",
-                "bucket": "aws-aispl-2-parquet-cur-nonprod",
-                "path": "aispl-2/cur-hourly-athena-data-export-aispl-2/data",
-                "access_type": "SAME_ACCOUNT"
-            },
-            "113288186989": {  # Testbook
-                "name": "testbook",
-                "bucket": "aws-testbook-edp-parquet-cur-nonprod",
-                "path": "testbook-edp/cur-hourly-athena-data-export-testbook-edp/data",
-                "access_type": "SAME_ACCOUNT"
-            },
-            "741843927392": {  # Lenskart
-                "name": "lenskart",
-                "bucket": "aws-lenskart-edp-parquet-cur-nonprod",
-                "path": "lenskart-edp/cur-hourly-athena-data-export-lenskart-edp/data",
-                "access_type": "SAME_ACCOUNT"
-            },
-            "455843933884": {  # Anarock (uses lenskart bucket)
-                "name": "anarock",
-                "bucket": "aws-lenskart-edp-parquet-cur-nonprod",
-                "path": "lenskart-edp/cur-hourly-athena-data-export-lenskart-edp/data",
-                "access_type": "SAME_ACCOUNT"
-            },
-            "460003782465": {  # US1
-                "name": "us-1",
-                "bucket": "aws-us-1-parquet-cur-nonprod",
-                "path": "us-1/cur-hourly-athena-data-export-us-1/data",
-                "access_type": "SAME_ACCOUNT"
-            },
-            "807725649461": {  # US2
-                "name": "us-2",
-                "bucket": "aws-us-2-parquet-cur-nonprod",
-                "path": "us-2/cur-hourly-athena-data-export-us-2/data",
-                "access_type": "SAME_ACCOUNT"
-            }
+        "name": "1mg",
+        "bucket": "aws-1mg-edp-parquet-cur-nonprod",
+        "path": "1mg-edp/cur-hourly-athena-data-export-1mg-edp/data",
+        "access_type": "SAME_ACCOUNT"
+    },
+    "519933445287": {
+        "name": "aispl-2",
+        "bucket": "aws-aispl-2-parquet-cur-nonprod",
+        "path": "aispl-2/cur-hourly-athena-data-export-aispl-2/data",
+        "access_type": "SAME_ACCOUNT"
+    },
+    "113288186989": {
+        "name": "testbook",
+        "bucket": "aws-testbook-edp-parquet-cur-nonprod",
+        "path": "testbook-edp/cur-hourly-athena-data-export-testbook-edp/data",
+        "access_type": "SAME_ACCOUNT"
+    },
+    "741843927392": {
+        "name": "lenskart",
+        "bucket": "aws-lenskart-edp-parquet-cur-nonprod",
+        "path": "lenskart-edp/cur-hourly-athena-data-export-lenskart-edp/data",
+        "access_type": "SAME_ACCOUNT"
+    },
+    "455843933884": {
+        "name": "anarock",
+        "bucket": "aws-lenskart-edp-parquet-cur-nonprod",
+        "path": "lenskart-edp/cur-hourly-athena-data-export-lenskart-edp/data",
+        "access_type": "SAME_ACCOUNT"
+    },
+    "460003782465": {
+        "name": "us-1",
+        "bucket": "aws-us-1-parquet-cur-nonprod",
+        "path": "us-1/cur-hourly-athena-data-export-us-1/data",
+        "access_type": "SAME_ACCOUNT"
+    },
+    "807725649461": {
+        "name": "us-2",
+        "bucket": "aws-us-2-parquet-cur-nonprod",
+        "path": "us-2/cur-hourly-athena-data-export-us-2/data",
+        "access_type": "SAME_ACCOUNT"
+    }
 }
 
-
-
+# Snowflake Configuration for fetching payer configs
+# Using UAT as default, can be overridden by secrets
+SNOWFLAKE_CONFIG = {
+    'user': 'payer_uat_jenkins',
+    'password': 'R8xVD7w!8A',
+    'account': 'tmb05570.us-east-1',
+    'warehouse': 'PAYER_UAT_SUMMARY_ETL',
+    'database': 'payer_uat',
+    'schema': 'payer_analytics_summary',
+    'role': 'ROLE_UAT_PAYER_SUMMARY_ETL',
+    'config_table': 'payers_buckets_path'
+}
 
 # CloudWatch Configuration
 CLOUDWATCH_CONFIG = {
     'namespace': 'FargateDataCopy',
-    'region': 'us-east-2'
+    'region': os.environ.get('AWS_REGION', 'us-east-2')
 }
 
 def get_environment_config(environment: str) -> Dict[str, Any]:
@@ -111,12 +122,12 @@ def get_environment_config(environment: str) -> Dict[str, Any]:
         'vhost': VHOST_MAPPING.get(environment.lower(), 'dev2'),
         'staging_bucket': STAGING_BUCKET
     }
-    
+
     # Environment-specific overrides
     if environment.lower() == 'prod':
         config.update({
             'staging_bucket': "ck-data-pipeline-new-master-staging",
             's3_region': 'us-east-1'
         })
-    
+
     return config
