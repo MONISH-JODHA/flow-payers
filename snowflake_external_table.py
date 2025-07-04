@@ -249,9 +249,7 @@ class SnowflakeExternalTableManager:
             logger.info(query_sql[:1000] + "...")
             logger.info("-----------------------------------------")
 
-            for cur in self.connection.execute_string(query_sql):
-                logger.info(f"Executed a statement in the script. Rows affected: {cur.rowcount}")
-            
+            self.cursor.execute(query_sql)
             logger.info("All analytics queries/script executed successfully.")
         except Exception as e:
             logger.error(f"A NON-FATAL ERROR occurred while executing analytics queries: {e}")

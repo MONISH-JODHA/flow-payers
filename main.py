@@ -96,17 +96,17 @@ def main():
             # Send final RabbitMQ notification
             try:
                 # Notifier is initialized with the correct environment
-                # notifier = RabbitMQNotifier(params['environment'])
-                # notifier.send_notification(
-                #     month=params['month'],
-                #     year=params['year'],
-                #     module=params['module'],
-                #     payer_ids=params['payer_ids'],
-                #     status=task_status.upper(),
-                #     partner_id=params['partner_id'],
-                #     message=f"Task finished with status: {status_reason}"
-                # )
-                pass
+                notifier = RabbitMQNotifier(params['environment'])
+                notifier.send_notification(
+                    month=params['month'],
+                    year=params['year'],
+                    module=params['module'],
+                    payer_ids=params['payer_ids'],
+                    status=task_status.upper(),
+                    partner_id=params['partner_id'],
+                    message=f"Task finished with status: {status_reason}"
+                )
+                
                 
             except Exception as notify_error:
                 logger.error(f"Failed to send final RabbitMQ notification: {notify_error}", exc_info=True)
