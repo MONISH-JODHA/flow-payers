@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+"""
+Input validation and parsing utilities (Final Corrected Version)
+"""
 import os
 import sys
 import json
@@ -5,119 +9,121 @@ import logging
 from typing import Dict, Any, Optional
 
 from config import DEFAULT_APP, DEFAULT_PROCESSING_MODE, DEFAULT_ENVIRONMENT, DEFAULT_MODULE
+
 logger = logging.getLogger(__name__)
 
 class InputReader:
-    """Read and parse input for the Fargate task."""
+    """Reads input from the environment, supporting multiple possible variable names."""
 
     @staticmethod
     def read_json_input() -> Optional[Dict[str, Any]]:
         """
-        Read JSON input, prioritizing the 'TASK_INPUT_JSON' environment variable.
+        Gets input JSON by checking a list of possible environment variable names.
+        This makes the application resilient to how the calling service provides input.
         """
-        json_string = os.environ.get('TASK_INPUT_JSON')
-        if json_string:
-            logger.info("Found JSON input in 'TASK_INPUT_JSON' environment variable.")
-            try:
-                return json.loads(json_string)
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to decode JSON from 'TASK_INPUT_JSON': {e}")
-                logger.error(f"Invalid JSON string: {json_string[:200]}...")
-                return None
-        return None
+        # List of possible environment variable names to check, in order of priority.
+        # Based on debugging, 'event' is the one currently being used by the backend.
+        possible_var_names = ['event', 'TASK_INPUT_JSON']
+        
+        json_string = None
+        source_var_name = None
 
-    @staticmethod
-    def construct_from_individual_env_vars() -> Optional[Dict[str, Any]]:
-        """
-        Fallback method to construct input from individual environment variables.
-        """
-        logger.info("Attempting to construct input from individual environment variables as a fallback.")
+        for var_name in possible_var_names:
+            value = os.environ.get(var_name)
+            if value:
+                json_string = value
+                source_var_name = var_name
+                logger.info(f"Found input data in environment variable: '{source_var_name}'")
+                break # Stop searching once we find one
+
+        if not json_string:
+            logger.error("="*50)
+            logger.error("FATAL: No input JSON found.")
+            logger.error(f"The application checked for the following environment variables and found none: {possible_var_names}")
+            logger.error("Please ensure the service triggering this task is setting one of these variables.")
+            logger.error("="*50)
+            return None
+
         try:
-            payers_str = os.environ.get('PAYERS') or os.environ.get('PAYER_ID')
-            if not payers_str:
-                return None
-
-            constructed_json = {
-                'year': int(os.environ['YEAR']),
-                'month': int(os.environ['MONTH']),
-                'payers': [p.strip() for p in payers_str.split(',')],
-                'partnerId': int(os.environ['PARTNER_ID']),
-                'module': os.environ.get('MODULE', DEFAULT_MODULE),
-                'env': os.environ.get('ENV', DEFAULT_ENVIRONMENT)
-            }
-            logger.info(f"Successfully constructed JSON from individual env vars: {constructed_json}")
-            return constructed_json
-        except (KeyError, ValueError) as e:
-            logger.debug(f"Could not construct JSON from individual env vars, missing or invalid value: {e}")
+            data = json.loads(json_string)
+            logger.info(f"Successfully parsed JSON from '{source_var_name}'.")
+            return data
+        except json.JSONDecodeError as e:
+            logger.error(f"FATAL: Failed to decode JSON from '{source_var_name}'. Error: {e}")
+            logger.error(f"Invalid JSON string received: {json_string[:500]}...")
             return None
 
 
 class InputValidator:
-    """Validate and normalize input parameters."""
+    """Validate and normalize input parameters"""
 
     @staticmethod
     def validate_and_normalize(json_data: dict) -> Dict[str, Any]:
-        """Validate JSON input parameters and normalize them for the application."""
-        logger.info(f"Validating JSON input: {json.dumps(json_data, indent=2)}")
+        """Validate input parameters from a dictionary and convert to a standard internal format."""
+        if not isinstance(json_data, dict):
+            raise TypeError("Input must be a dictionary.")
 
-        required_fields = ['year', 'month', 'payers', 'partnerId', 'module']
-        missing = [field for field in required_fields if field not in json_data]
+        logger.info(f"Validating received data: {json.dumps(json_data)}")
+
+        # Handle legacy 'payerAccountIds' key for backward compatibility
+        if 'payerAccountIds' in json_data and 'payers' not in json_data:
+            logger.warning("API compatibility: Translating 'payerAccountIds' to 'payers'.")
+            json_data['payers'] = json_data.pop('payerAccountIds')
+
+        # Check for presence of required fields
+        required_fields = ['year', 'month', 'payers']
+        missing = [field for field in required_fields if json_data.get(field) is None]
         if missing:
-            raise ValueError(f"Missing required JSON parameters: {', '.join(missing)}")
+            raise ValueError(f"Payload is missing required non-null values for: {', '.join(missing)}")
 
         try:
+            # --- Type casting and validation ---
             year = int(json_data['year'])
-            if not 2020 <= year <= 2035: # Increased range
-                raise ValueError("Year must be between 2020 and 2035")
-
             month = int(json_data['month'])
-            if not 1 <= month <= 12:
-                raise ValueError("Month must be between 1 and 12")
-
             payers = json_data['payers']
+            
+            # Safely get optional values
+            partner_id = int(json_data.get('partnerId') or 0)
+            environment = str(json_data.get('environment') or json_data.get('env') or DEFAULT_ENVIRONMENT).lower()
+            module = str(json_data.get('module') or DEFAULT_MODULE).lower()
+
+            # --- Value range and format validation ---
+            if not 2020 <= year <= 2035:
+                raise ValueError(f"Year '{year}' is out of the valid range (2020-2035)")
+            if not 1 <= month <= 12:
+                raise ValueError(f"Month '{month}' is out of the valid range (1-12)")
             if not isinstance(payers, list) or not payers:
-                raise ValueError("Payers must be a non-empty list")
-            payer_ids = [str(p) for p in payers]
-
-            partner_id = int(json_data['partnerId'])
-            environment = str(json_data.get('env') or json_data.get('environment', DEFAULT_ENVIRONMENT)).lower()
-            module = str(json_data['module']).lower()
-
-            return {
+                raise ValueError("The 'payers' field must be a non-empty list.")
+            
+            validated_params = {
                 'year': year,
                 'month': month,
-                'payer_ids': payer_ids,
+                'payer_ids': [str(p) for p in payers], # Ensure all payer IDs are strings
                 'partner_id': partner_id,
                 'environment': environment,
                 'module': module,
-                # Staging bucket is now determined by get_environment_config, not hardcoded here
                 'app': DEFAULT_APP,
                 'processing_mode': DEFAULT_PROCESSING_MODE
             }
-        except (ValueError, TypeError) as e:
-            logger.error(f"Parameter validation error: {e}")
+            
+            logger.info("Parameter validation successful.")
+            return validated_params
+            
+        except (ValueError, TypeError, KeyError) as e:
+            logger.error(f"Parameter validation failed: {e}", exc_info=True)
             raise
 
 
 class ParameterProcessor:
-    """Gets and validates parameters from the best available source."""
-
+    """Process and normalize parameters from the environment."""
+    
     @staticmethod
     def get_parameters() -> Dict[str, Any]:
-        """
-        Gets parameters from the primary source (JSON env var) or falls back to
-        individual env vars.
-        """
-        # Try primary method: A single JSON object in an environment variable
-        json_data = InputReader.read_json_input()
-        if json_data:
-            logger.info(" Using JSON input method (Primary).")
-            return InputValidator.validate_and_normalize(json_data)
-
-        # Try fallback method: Individual environment variables
-        json_data = InputReader.construct_from_individual_env_vars()
-        if json_data:
-            logger.info(" Using individual environment variables (Fallback).")
-            return InputValidator.validate_and_normalize(json_data)
-
-        raise ValueError("No valid input parameters found from any source. Please set TASK_INPUT_JSON.")
+        """Get parameters from the environment."""
+        logger.info("Attempting to get and validate task parameters...")
+        raw_data = InputReader.read_json_input()
+        
+        if raw_data:
+            return InputValidator.validate_and_normalize(raw_data)
+        
+        raise ValueError("Could not retrieve parameters. Check logs for details.")

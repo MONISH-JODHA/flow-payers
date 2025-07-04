@@ -1,3 +1,5 @@
+# rabbitmq_client.py (Corrected for specific payload format)
+
 import os
 import json
 import ssl
@@ -57,13 +59,28 @@ class RabbitMQNotifier:
         """
         Establishes a connection, sends a single notification message with retry logic,
         and ensures the connection is closed.
+        
+        This version is modified to create the exact payload format the consumer expects.
         """
+        # --- START OF CORRECTIONS ---
+
+        # CHANGE 1: Force the 'module' to have a capital letter, as required by the consumer.
+        # "analytics" -> "Analytics"
+        formatted_module = module.capitalize()
+
+        # CHANGE 2: Build the payload WITHOUT the optional 'message' key.
         payload = {
-            "month": month, "year": year, "module": module, "payerIds": payer_ids,
-            "status": status.upper(), "partnerId": partner_id
+            "month": month, 
+            "year": year, 
+            "module": formatted_module, # Use the correctly cased module
+            "payerIds": payer_ids,
+            "status": status.upper(), 
+            "partnerId": partner_id
         }
-        if message:
-            payload["message"] = message
+        
+        # The logic that added the "message" key has been removed.
+
+        # --- END OF CORRECTIONS ---
 
         message_body = json.dumps(payload, indent=2)
         connection = None
@@ -95,7 +112,7 @@ class RabbitMQNotifier:
             except AMQPConnectionError as e:
                 logger.error(f"RabbitMQ connection attempt {attempt + 1}/{max_retries} failed: {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(5 * (attempt + 1))  # Exponential backoff
+                    time.sleep(5 * (attempt + 1))
                 else:
                     logger.error("Failed to connect to RabbitMQ after all retries.")
             except Exception as e:
