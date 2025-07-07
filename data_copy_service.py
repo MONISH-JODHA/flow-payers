@@ -92,10 +92,14 @@ class FargateDataCopyService:
 
             # We must scan both the current and previous month's folders
             # to catch late-arriving data.
-            current_month_prefix = f"{source_path.rstrip('/')}/data/BILLING_PERIOD={year}-{month:02}/"
+            # --- START OF FIX ---
+            # The redundant `/data` is removed from the prefix construction.
+            # The path from config.py already contains the correct base path.
+            current_month_prefix = f"{source_path.rstrip('/')}/BILLING_PERIOD={year}-{month:02}/"
             prev_month = month - 1 if month > 1 else 12
             prev_year = year if month > 1 else year - 1
-            prev_month_prefix = f"{source_path.rstrip('/')}/data/BILLING_PERIOD={prev_year}-{prev_month:02}/"
+            prev_month_prefix = f"{source_path.rstrip('/')}/BILLING_PERIOD={prev_year}-{prev_month:02}/"
+            # --- END OF FIX ---
             
             prefixes_to_scan = [current_month_prefix, prev_month_prefix]
             logger.info(f"Scanning S3 prefixes: {prefixes_to_scan}")
@@ -103,9 +107,10 @@ class FargateDataCopyService:
             try:
                 files_to_copy_list = []
                 for prefix in prefixes_to_scan:
-                    new_files_in_prefix = self.s3_client.list_objects_with_metadata(source_bucket, prefix, since=last_processed_ts)
-                    for filename in new_files_in_prefix.keys():
-                        files_to_copy_list.append(f"{prefix}{filename}")
+                    # Note: We are using a new "list_objects_with_metadata" that returns full keys
+                    found_files = self.s3_client.list_objects_with_metadata(source_bucket, prefix, since=last_processed_ts)
+                    # We need the full key, not just the filename
+                    files_to_copy_list.extend(found_files.keys()) 
                 
                 if files_to_copy_list:
                     logger.info(f"   Found {len(files_to_copy_list)} new files to process.")

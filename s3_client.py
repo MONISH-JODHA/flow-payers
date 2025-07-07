@@ -14,7 +14,6 @@ from snowflake_external_table import SnowflakeConfigFetcher
 logger = logging.getLogger(__name__)
 
 class S3Client:
-    # ... (the first part of the class remains the same) ...
     """Enhanced S3 client for cross-account and cross-region operations"""
     def __init__(self, region_name=None):
         self.region = region_name or S3_CONFIG.get('region_name', 'us-east-2')
@@ -59,7 +58,7 @@ class S3Client:
 
     def list_objects_with_metadata(self, bucket: str, prefix: str, since: Optional[datetime] = None) -> Dict[str, Dict[str, Any]]:
         """
-        Lists all objects under a prefix, returning a map of filename -> {'ETag', 'Size'}.
+        Lists all objects under a prefix, returning a map of full_key -> {'ETag', 'Size'}.
         Optionally, only returns objects modified *since* a given datetime.
         """
         objects_map = {}
@@ -68,13 +67,12 @@ class S3Client:
             pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
             for page in pages:
                 for obj in page.get('Contents', []):
-                    # --- NEW LOGIC ---
                     if since and obj['LastModified'] <= since:
                         continue # Skip this object as it's not new
-                    # --- END NEW LOGIC ---
-                    filename = os.path.basename(obj['Key'])
-                    if filename:
-                        objects_map[filename] = {
+                    
+                    full_key = obj['Key']
+                    if full_key and not full_key.endswith('/'): # Exclude folder objects
+                        objects_map[full_key] = {
                             'ETag': obj['ETag'].strip('"'),
                             'Size': obj['Size'],
                             'LastModified': obj['LastModified']
