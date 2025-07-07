@@ -19,14 +19,18 @@ def log_processing_parameters(params):
     """Log processing parameters"""
     logger.info("--- Processing Parameters ---")
     for key, value in params.items():
-        logger.info(f"  {key.replace('_', ' ').title()}: {value}")
+        # --- FIX: Log unique payer IDs ---
+        if key == 'payer_ids':
+             logger.info(f"  Payer Ids (Unique): {value}")
+        else:
+             logger.info(f"  {key.replace('_', ' ').title()}: {value}")
     logger.info("-----------------------------")
 
 def main():
     """Main function for the Fargate task."""
     task_status = "Failed"
     status_reason = "UnknownError"
-    failure_details = "An unknown error occurred." # New variable for detailed error message
+    failure_details = "An unknown error occurred."
     params = None
 
     environment = os.environ.get('ENV', os.environ.get('ENVIRONMENT', DEFAULT_ENVIRONMENT)).lower()
@@ -38,7 +42,16 @@ def main():
         logger.info("=" * 80)
 
         params = ParameterProcessor.get_parameters()
-        environment = params.get('environment', environment) # Update environment if specified in params
+        
+        # --- START OF FIX: Ensure payer IDs are unique ---
+        original_payer_ids = params.get('payer_ids', [])
+        unique_payer_ids = sorted(list(set(original_payer_ids)))
+        if len(original_payer_ids) != len(unique_payer_ids):
+            logger.warning(f"Duplicate payer IDs found in input. Processing unique set: {unique_payer_ids}")
+        params['payer_ids'] = unique_payer_ids
+        # --- END OF FIX ---
+
+        environment = params.get('environment', environment)
         log_processing_parameters(params)
 
         env_config = get_environment_config(environment)
@@ -55,6 +68,8 @@ def main():
             app=params['app'],
             module=params['module']
         )
+
+        # ... (rest of main.py remains the same) ...
 
         if result["status"] == "UP_TO_DATE":
             logger.info("SUCCESS: All payer data was already synchronized.")
@@ -82,7 +97,7 @@ def main():
     except Exception as e:
         logger.error(f"A fatal error occurred in the Fargate task: {e}", exc_info=True)
         status_reason = type(e).__name__ 
-        failure_details = f"Fatal error: {str(e)}" # Capture the specific error message
+        failure_details = f"Fatal error: {str(e)}"
         send_error_metric('FatalError', str(e))
 
     finally:
@@ -90,7 +105,6 @@ def main():
         logger.info(f"  Final Status: {task_status}")
         logger.info(f"  Reason: {status_reason}")
 
-        # Send CloudWatch metric with the final status
         send_task_completion(task_status, status_reason, Environment=environment)
 
         try:
@@ -102,14 +116,13 @@ def main():
                     month=params.get('month', 0),
                     year=params.get('year', 0),
                     module=params.get('module', 'unknown'),
-                    payer_ids=params.get('payer_ids', []),
+                    payer_ids=original_payer_ids, # Send original list in notification
                     status=task_status.upper(),
                     partner_id=params.get('partner_id', 0),
-                    message=failure_details # Pass the detailed message
+                    message=failure_details
                 )
             else:
                 logger.warning("Parameters were not parsed. Sending a minimal failure notification.")
-                # failure_details is already set from the 'except' block in this case
                 notifier.send_notification(
                     month=0,
                     year=0,
@@ -117,7 +130,7 @@ def main():
                     payer_ids=[],
                     status=task_status.upper(),
                     partner_id=0,
-                    message=failure_details # Pass the detailed message
+                    message=failure_details
                 )
 
         except Exception as notify_error:

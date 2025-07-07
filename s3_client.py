@@ -1,6 +1,4 @@
-#
-# s3_client.py (Updated)
-#
+
 import os
 import boto3
 import logging
@@ -68,10 +66,10 @@ class S3Client:
             for page in pages:
                 for obj in page.get('Contents', []):
                     if since and obj['LastModified'] <= since:
-                        continue # Skip this object as it's not new
+                        continue 
                     
                     full_key = obj['Key']
-                    if full_key and not full_key.endswith('/'): # Exclude folder objects
+                    if full_key and not full_key.endswith('/'): 
                         objects_map[full_key] = {
                             'ETag': obj['ETag'].strip('"'),
                             'Size': obj['Size'],
