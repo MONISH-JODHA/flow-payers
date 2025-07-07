@@ -98,7 +98,7 @@ class InputValidator:
             validated_params = {
                 'year': year,
                 'month': month,
-                'payer_ids': [str(p) for p in payers], # Ensure all payer IDs are strings
+                'payer_ids': [str(p) for p in payers], 
                 'partner_id': partner_id,
                 'environment': environment,
                 'module': module,
