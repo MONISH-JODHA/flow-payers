@@ -1,4 +1,6 @@
-
+#
+# data_copy_service.py (Final Corrected Version for Success Logic)
+#
 import os
 import logging
 from typing import List, Dict, Any, Tuple, Optional
@@ -18,41 +20,39 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
 class FargateDataCopyService:
     """
     Orchestrates the data copy operation from source payer accounts to a central staging bucket.
-    This service analyzes payers, copies new data files in parallel, and triggers
-    downstream processing in Snowflake.
+    This service analyzes payers, cleans the destination, copies new data files in parallel, 
+    and triggers downstream processing in Snowflake.
     """
 
     def __init__(self, environment: str = 'uat'):
         self.environment = environment
         self.env_config = get_environment_config(environment)
         s3_region = self.env_config.get('s3_region')
-        
+
         self.s3_client = S3Client(region_name=s3_region)
         self.payer_config_manager = PayerConfigManager(self.environment)
-        
+
         if SNOWFLAKE_AVAILABLE:
             self.snowflake_manager = SnowflakeExternalTableManager(self.environment, 'analytics')
         else:
             self.snowflake_manager = None
-            
+
         logger.info(f"FargateDataCopyService initialized for env: '{environment}' with {MAX_COPY_WORKERS} workers.")
 
     def process_multiple_payers(self, payer_ids: List[str], year: int, month: int,
                                staging_bucket: str, app: str, module: str) -> Dict[str, Any]:
         """
-        Main orchestration method. Analyzes multiple payers, determines files to sync, 
+        Main orchestration method. Analyzes multiple payers, determines files to sync,
         and triggers the copy and processing logic.
-
-        Returns:
-            A dictionary summarizing the final status of the operation.
         """
         logger.info(f"Starting analysis for {len(payer_ids)} payers for {year}-{month:02}.")
-        
-        all_payer_metadata = []
-        failed_payers = []
+
+        payers_with_new_files = []
+        payers_failed_analysis = []
 
         if self.snowflake_manager:
             try:
@@ -60,43 +60,52 @@ class FargateDataCopyService:
             except Exception as e:
                 logger.error(f"Cannot connect to Snowflake for timestamps; will process all files. Error: {e}")
                 self.snowflake_manager = None
-        
+
         for payer_id in payer_ids:
             status, result = self._analyze_single_payer(payer_id, year, month)
             if status == 'HAS_NEW_FILES':
-                all_payer_metadata.append(result)
-            elif status == 'FAILED':
-                failed_payers.append(payer_id)
-        
+                payers_with_new_files.append(result)
+            elif status == 'UP_TO_DATE':
+                # This is a successful state, so we don't add to any list.
+                pass
+            else:  # FAILED
+                payers_failed_analysis.append(payer_id)
+
         if self.snowflake_manager:
             self.snowflake_manager.close_connection()
 
-        if not all_payer_metadata and not failed_payers:
-            logger.info("\nSUCCESS: All data for all specified payers is already synchronized.")
-            return {"status": "UP_TO_DATE", "failed_payers": []}
+        # If no payers had new files to copy, the task is successful.
+        if not payers_with_new_files:
+            logger.info("No payers had new files to copy. Task is considered successful.")
+            # We still report which payers failed analysis for informational purposes.
+            return {"status": "UP_TO_DATE", "failed_payers": payers_failed_analysis}
 
-        if not all_payer_metadata and failed_payers:
-            logger.error("\nFAILURE: All payers failed during analysis phase.")
-            return {"status": "FAILED", "copy_summary": {"success": 0, "failed": 0, "total": 0}, "failed_payers": failed_payers}
-
+        # Proceed to copy and process if we have files from at least one payer
         copy_summary = self._execute_copy_and_snowflake_process(
-            all_payer_metadata, staging_bucket, app, module, year, month
+            payers_with_new_files, staging_bucket, app, module, year, month
         )
 
-        overall_success = (copy_summary["failed"] == 0 and not failed_payers)
-        return {
-            "status": "SUCCESS" if overall_success else "FAILED",
-            "copy_summary": copy_summary,
-            "failed_payers": failed_payers
-        }
+        # --- START OF LOGIC CHANGE ---
+        # The overall task is a SUCCESS if the copy/Snowflake part had no errors.
+        # Failures during the initial analysis of some payers do not fail the whole task.
+        if copy_summary["failed"] == 0:
+            return {
+                "status": "SUCCESS",
+                "copy_summary": copy_summary,
+                "failed_payers": payers_failed_analysis  # Informational
+            }
+        else:
+            return {
+                "status": "FAILED",
+                "copy_summary": copy_summary,
+                "failed_payers": payers_failed_analysis
+            }
+        # --- END OF LOGIC CHANGE ---
+
 
     def _analyze_single_payer(self, payer_id: str, year: int, month: int) -> Tuple[str, Optional[Dict[str, Any]]]:
         """
         Performs analysis for a single payer to find new files.
-
-        Returns:
-            A tuple containing the status ('HAS_NEW_FILES', 'UP_TO_DATE', 'FAILED') 
-            and a data dictionary.
         """
         logger.info(f"\n--- Analyzing Payer: {payer_id} ---")
         try:
@@ -122,19 +131,8 @@ class FargateDataCopyService:
                 if last_processed_ts:
                     last_processed_ts = last_processed_ts.replace(tzinfo=timezone.utc)
 
-            # --- START OF MODIFICATION ---
-            # This logic now ONLY scans the specified month. The previous month's
-            # logic has been removed to prevent picking up late-arriving data.
-            prefixes_to_scan = []
             current_month_prefix = f"{source_path_base.rstrip('/')}/data/BILLING_PERIOD={year}-{month:02}/"
-            prefixes_to_scan.append(current_month_prefix)
-
-            # The following lines have been removed:
-            # prev_month = month - 1 if month > 1 else 12
-            # prev_year = year if month > 1 else year - 1
-            # prev_month_prefix = f"{source_path_base.rstrip('/')}/data/BILLING_PERIOD={prev_year}-{prev_month:02}/"
-            # prefixes_to_scan.append(prev_month_prefix)
-            # --- END OF MODIFICATION ---
+            prefixes_to_scan = [current_month_prefix]
             
             logger.info(f"Scanning S3 prefixes: {prefixes_to_scan}")
 
@@ -159,32 +157,26 @@ class FargateDataCopyService:
             logger.error(f"An unexpected error occurred analyzing files for payer {payer_id}: {e}", exc_info=True)
             return 'FAILED', None
             
-    def _execute_copy_and_snowflake_process(self, all_payer_metadata: List[Dict], staging_bucket: str,
+    def _execute_copy_and_snowflake_process(self, payers_with_new_files: List[Dict], staging_bucket: str,
                                             app: str, module: str, year: int, month: int) -> Dict[str, int]:
         """
         Manages the cleanup, parallel file copy, and subsequent Snowflake processing.
         """
         summary = {"success": 0, "failed": 0, "total": 0}
         all_copy_tasks = []
-        processed_payer_ids = [p['payer_id'] for p in all_payer_metadata]
+        processed_payer_ids = [p['payer_id'] for p in payers_with_new_files]
 
-        logger.info(f"Preparing to copy files for {len(processed_payer_ids)} payers.")
+        logger.info(f"Preparing to copy files for {len(processed_payer_ids)} payers who have new data.")
 
-        for payer_data in all_payer_metadata:
+        for payer_data in payers_with_new_files:
             payer_id = payer_data['payer_id']
             source_bucket = payer_data['source_bucket']
             dest_prefix = f"{app}/{module}/{self.environment}/year={year}/month={month}/payer-{payer_id}/"
 
-            # --- START OF NEW LOGIC ---
-            # Clean the destination directory for this specific payer before copying new files.
-            # This makes the process idempotent.
             logger.info(f"Cleaning destination for payer {payer_id} before copy...")
             if not self.s3_client.delete_objects_by_prefix(staging_bucket, dest_prefix):
-                logger.error(f"Halting process for payer {payer_id} due to failure in cleaning destination.")
-                # We can decide to either fail the whole payer or just log and continue.
-                # For safety, let's skip adding copy tasks for this failed payer.
-                continue 
-            # --- END OF NEW LOGIC ---
+                logger.error(f"Halting process for payer {payer_id} due to failure in cleaning destination. This payer's files will not be copied.")
+                continue
 
             for source_key in payer_data['files_to_copy']:
                 filename = os.path.basename(source_key)
@@ -197,7 +189,7 @@ class FargateDataCopyService:
         total_tasks = len(all_copy_tasks)
         summary["total"] = total_tasks
         if total_tasks == 0:
-            logger.warning("No new or modified files were queued for copying after cleanup phase.")
+            logger.warning("No files were queued for copying after cleanup phase. This may be due to cleanup failures.")
             return summary
 
         logger.info(f"Starting multithreaded copy of {total_tasks} files...")
@@ -219,7 +211,7 @@ class FargateDataCopyService:
             logger.warning("Skipping Snowflake processing due to data copy failures.")
             return summary
 
-        if SNOWFLAKE_AVAILABLE:
+        if SNOWFLAKE_AVAILABLE and processed_payer_ids:
             try:
                 logger.info("Starting Snowflake external table creation...")
                 create_external_table_and_process(
@@ -229,8 +221,8 @@ class FargateDataCopyService:
                 logger.info("Snowflake external table process completed successfully!")
             except Exception as snowflake_error:
                 logger.error(f"Snowflake external table creation failed: {snowflake_error}", exc_info=True)
-                summary["failed"] = summary["total"]
+                summary["failed"] = total_tasks
         else:
-            logger.warning("Snowflake module not available, skipping external table creation.")
+            logger.warning("Snowflake module not available or no payers had data to process, skipping external table creation.")
 
         return summary
