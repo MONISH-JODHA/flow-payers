@@ -1,4 +1,4 @@
-# main.py (Final Corrected Version)
+# main.py
 
 import sys
 import logging
@@ -8,6 +8,9 @@ from input_validator import ParameterProcessor
 from data_copy_service import FargateDataCopyService
 from rabbitmq_client import RabbitMQNotifier
 from cloudwatch_utils import send_task_completion, send_error_metric, send_processing_metrics
+# --- START OF CHANGE ---
+from slack_notifier import send_slack_notification
+# --- END OF CHANGE ---
 from config import get_environment_config, DEFAULT_ENVIRONMENT
 
 logger = logging.getLogger(__name__)
@@ -109,6 +112,20 @@ def main():
         logger.info(f"  Reason: {status_reason}")
 
         send_task_completion(task_status, status_reason, Environment=environment)
+
+        # --- START OF CHANGE ---
+        # Send Slack notification. This is wrapped in its own try/except
+        # to ensure that a failure here doesn't stop other finalization steps.
+        try:
+            send_slack_notification(
+                status=task_status,
+                environment=environment,
+                details=failure_details,
+                params=params
+            )
+        except Exception as slack_error:
+            logger.error(f"CRITICAL: Failed to send final Slack notification: {slack_error}", exc_info=True)
+        # --- END OF CHANGE ---
 
         try:
             notifier = RabbitMQNotifier(environment)

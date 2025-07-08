@@ -20,21 +20,9 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY config.py .
-COPY rabbitmq_client.py .
-COPY s3_client.py .
-COPY input_validator.py .
-COPY data_copy_service.py .
-COPY cloudwatch_utils.py .
-COPY main.py .
-
-# Copy Snowflake module (assuming it exists in the build context)
-COPY snowflake_external_table.py .
-
-# --- ADD THIS LINE ---
-# Copy the analytics query SQL file
-COPY analytics_wastage_queries.sql /app/analytics_wastage_queries.sql
+# Copy all application code and files from the current directory into the image
+# This is more robust than copying files one by one.
+COPY . .
 
 # Create non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser

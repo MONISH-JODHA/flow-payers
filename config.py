@@ -115,6 +115,23 @@ CLOUDWATCH_CONFIG = {
     'region': os.environ.get('AWS_REGION', 'us-east-2') # Region is dynamically set by the Fargate task
 }
 
+# --- START OF CHANGE ---
+# --- Slack Notification Configuration ---
+# BEST PRACTICE: These webhook URLs are secrets and should NOT be stored in source code.
+# They should be stored in AWS Secrets Manager and loaded into the Fargate task's
+# environment variables at runtime. The code reads from environment variables first.
+SLACK_CONFIG = {
+    'channel_prod_success': 'cln-data-notification-refresh-analytics-prod',
+    'webhook_url_prod_success': os.environ.get('SLACK_WEBHOOK_URL_PROD_SUCCESS', 'https://hooks.slack.com/services/YOUR/PLACEHOLDER/URL_PROD_SUCCESS'),
+    
+    'channel_prod_failure': 'cln-data-notification-failures-prod',
+    'webhook_url_prod_failure': os.environ.get('SLACK_WEBHOOK_URL_PROD_FAILURE', 'https://hooks.slack.com/services/YOUR/PLACEHOLDER/URL_PROD_FAILURE'),
+
+    'channel_non_prod': 'sec',
+    'webhook_url_non_prod': os.environ.get('SLACK_WEBHOOK_URL_NON_PROD', 'https://hooks.slack.com/services/YOUR/PLACEHOLDER/URL_NON_PROD')
+}
+# --- END OF CHANGE ---
+
 def get_environment_config(environment: str) -> Dict[str, Any]:
     """
     Get environment-specific configuration for S3 and other services.
