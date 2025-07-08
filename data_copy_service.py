@@ -122,11 +122,19 @@ class FargateDataCopyService:
                 if last_processed_ts:
                     last_processed_ts = last_processed_ts.replace(tzinfo=timezone.utc)
 
+            # --- START OF MODIFICATION ---
+            # This logic now ONLY scans the specified month. The previous month's
+            # logic has been removed to prevent picking up late-arriving data.
             prefixes_to_scan = []
-            for m in [month, (month - 1 if month > 1 else 12)]:
-                y = year if m <= month else year - 1
-                prefix = f"{source_path_base.rstrip('/')}/data/BILLING_PERIOD={y}-{m:02}/"
-                prefixes_to_scan.append(prefix)
+            current_month_prefix = f"{source_path_base.rstrip('/')}/data/BILLING_PERIOD={year}-{month:02}/"
+            prefixes_to_scan.append(current_month_prefix)
+
+            # The following lines have been removed:
+            # prev_month = month - 1 if month > 1 else 12
+            # prev_year = year if month > 1 else year - 1
+            # prev_month_prefix = f"{source_path_base.rstrip('/')}/data/BILLING_PERIOD={prev_year}-{prev_month:02}/"
+            # prefixes_to_scan.append(prev_month_prefix)
+            # --- END OF MODIFICATION ---
             
             logger.info(f"Scanning S3 prefixes: {prefixes_to_scan}")
 
@@ -154,7 +162,7 @@ class FargateDataCopyService:
     def _execute_copy_and_snowflake_process(self, all_payer_metadata: List[Dict], staging_bucket: str,
                                             app: str, module: str, year: int, month: int) -> Dict[str, int]:
         """
-        Manages the parallel file copy and subsequent Snowflake processing.
+        Manages the cleanup, parallel file copy, and subsequent Snowflake processing.
         """
         summary = {"success": 0, "failed": 0, "total": 0}
         all_copy_tasks = []
@@ -166,6 +174,18 @@ class FargateDataCopyService:
             payer_id = payer_data['payer_id']
             source_bucket = payer_data['source_bucket']
             dest_prefix = f"{app}/{module}/{self.environment}/year={year}/month={month}/payer-{payer_id}/"
+
+            # --- START OF NEW LOGIC ---
+            # Clean the destination directory for this specific payer before copying new files.
+            # This makes the process idempotent.
+            logger.info(f"Cleaning destination for payer {payer_id} before copy...")
+            if not self.s3_client.delete_objects_by_prefix(staging_bucket, dest_prefix):
+                logger.error(f"Halting process for payer {payer_id} due to failure in cleaning destination.")
+                # We can decide to either fail the whole payer or just log and continue.
+                # For safety, let's skip adding copy tasks for this failed payer.
+                continue 
+            # --- END OF NEW LOGIC ---
+
             for source_key in payer_data['files_to_copy']:
                 filename = os.path.basename(source_key)
                 dest_key = f"{dest_prefix}{filename}"
@@ -177,12 +197,11 @@ class FargateDataCopyService:
         total_tasks = len(all_copy_tasks)
         summary["total"] = total_tasks
         if total_tasks == 0:
-            logger.warning("No new or modified files were queued for copying.")
+            logger.warning("No new or modified files were queued for copying after cleanup phase.")
             return summary
 
         logger.info(f"Starting multithreaded copy of {total_tasks} files...")
         with ThreadPoolExecutor(max_workers=MAX_COPY_WORKERS) as executor:
-
             future_to_task = {executor.submit(self.s3_client.copy_single_file, **task): task for task in all_copy_tasks}
             for i, future in enumerate(as_completed(future_to_task), 1):
                 if future.result():
@@ -210,7 +229,7 @@ class FargateDataCopyService:
                 logger.info("Snowflake external table process completed successfully!")
             except Exception as snowflake_error:
                 logger.error(f"Snowflake external table creation failed: {snowflake_error}", exc_info=True)
-                summary["failed"] = summary["total"] 
+                summary["failed"] = summary["total"]
         else:
             logger.warning("Snowflake module not available, skipping external table creation.")
 

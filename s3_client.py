@@ -98,6 +98,54 @@ class S3Client:
             logger.error(f"An unexpected error occurred during copy of {source_key}: {e}")
             return False
 
+
+    def delete_objects_by_prefix(self, bucket: str, prefix: str) -> bool:
+        """
+        Deletes all objects under a given prefix in an S3 bucket.
+
+        Args:
+            bucket (str): The name of the S3 bucket.
+            prefix (str): The prefix to delete objects from.
+
+        Returns:
+            bool: True if deletion was successful or no objects were found, False otherwise.
+        """
+        logger.warning(f"Preparing to delete all objects under prefix: s3://{bucket}/{prefix}")
+        try:
+            # First, list all objects under the prefix
+            paginator = self.s3_client.get_paginator('list_objects_v2')
+            pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+            
+            objects_to_delete = []
+            for page in pages:
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        objects_to_delete.append({'Key': obj['Key']})
+
+            if not objects_to_delete:
+                logger.info(f"No objects found to delete under prefix: s3://{bucket}/{prefix}")
+                return True
+
+            logger.info(f"Found {len(objects_to_delete)} objects to delete.")
+            
+            # The delete_objects API can take up to 1000 keys at a time. We chunk it.
+            for i in range(0, len(objects_to_delete), 1000):
+                chunk = objects_to_delete[i:i + 1000]
+                response = self.s3_client.delete_objects(
+                    Bucket=bucket,
+                    Delete={'Objects': chunk, 'Quiet': True}
+                )
+                if 'Errors' in response:
+                    logger.error(f"Errors occurred during S3 object deletion: {response['Errors']}")
+                    return False
+
+            logger.info(f"Successfully deleted all objects under prefix: s3://{bucket}/{prefix}")
+            return True
+            
+        except ClientError as e:
+            logger.error(f"Failed to delete objects from s3://{bucket}/{prefix}: {e}", exc_info=True)
+            return False
+        
 # ... (PayerConfigManager class remains the same) ...
 class PayerConfigManager:
     """
