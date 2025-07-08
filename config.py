@@ -127,7 +127,7 @@ SLACK_CONFIG = {
     'channel_prod_failure': 'cln-data-notification-failures-prod',
     'webhook_url_prod_failure': os.environ.get('SLACK_WEBHOOK_URL_PROD_FAILURE', 'https://hooks.slack.com/services/YOUR/PLACEHOLDER/URL_PROD_FAILURE'),
 
-    'channel_non_prod': 'sec',
+    'channel_non_prod': 'sector-144',
     'webhook_url_non_prod': os.environ.get('SLACK_WEBHOOK_URL_NON_PROD', 'https://hooks.slack.com/services/YOUR/PLACEHOLDER/URL_NON_PROD')
 }
 # --- END OF CHANGE ---
