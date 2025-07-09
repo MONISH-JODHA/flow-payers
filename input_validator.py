@@ -21,8 +21,6 @@ class InputReader:
         Gets input JSON by checking a list of possible environment variable names.
         This makes the application resilient to how the calling service provides input.
         """
-        # List of possible environment variable names to check, in order of priority.
-        # Based on debugging, 'event' is the one currently being used by the backend.
         possible_var_names = ['event', 'TASK_INPUT_JSON']
         
         json_string = None
@@ -34,7 +32,7 @@ class InputReader:
                 json_string = value
                 source_var_name = var_name
                 logger.info(f"Found input data in environment variable: '{source_var_name}'")
-                break # Stop searching once we find one
+                break 
 
         if not json_string:
             logger.error("="*50)
@@ -65,29 +63,24 @@ class InputValidator:
 
         logger.info(f"Validating received data: {json.dumps(json_data)}")
 
-        # Handle legacy 'payerAccountIds' key for backward compatibility
         if 'payerAccountIds' in json_data and 'payers' not in json_data:
             logger.warning("API compatibility: Translating 'payerAccountIds' to 'payers'.")
             json_data['payers'] = json_data.pop('payerAccountIds')
 
-        # Check for presence of required fields
         required_fields = ['year', 'month', 'payers']
         missing = [field for field in required_fields if json_data.get(field) is None]
         if missing:
             raise ValueError(f"Payload is missing required non-null values for: {', '.join(missing)}")
 
         try:
-            # --- Type casting and validation ---
             year = int(json_data['year'])
             month = int(json_data['month'])
             payers = json_data['payers']
             
-            # Safely get optional values
             partner_id = int(json_data.get('partnerId') or 0)
             environment = str(json_data.get('environment') or json_data.get('env') or DEFAULT_ENVIRONMENT).lower()
             module = str(json_data.get('module') or DEFAULT_MODULE).lower()
 
-            # --- Value range and format validation ---
             if not 2020 <= year <= 2035:
                 raise ValueError(f"Year '{year}' is out of the valid range (2020-2035)")
             if not 1 <= month <= 12:

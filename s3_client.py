@@ -112,7 +112,6 @@ class S3Client:
         """
         logger.warning(f"Preparing to delete all objects under prefix: s3://{bucket}/{prefix}")
         try:
-            # First, list all objects under the prefix
             paginator = self.s3_client.get_paginator('list_objects_v2')
             pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
             
@@ -128,7 +127,6 @@ class S3Client:
 
             logger.info(f"Found {len(objects_to_delete)} objects to delete.")
             
-            # The delete_objects API can take up to 1000 keys at a time. We chunk it.
             for i in range(0, len(objects_to_delete), 1000):
                 chunk = objects_to_delete[i:i + 1000]
                 response = self.s3_client.delete_objects(
@@ -146,7 +144,6 @@ class S3Client:
             logger.error(f"Failed to delete objects from s3://{bucket}/{prefix}: {e}", exc_info=True)
             return False
         
-# ... (PayerConfigManager class remains the same) ...
 class PayerConfigManager:
     """
     Manages payer configurations.

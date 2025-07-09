@@ -1,6 +1,4 @@
-#
-# data_copy_service.py (Final Corrected Version for Success Logic)
-#
+
 import os
 import logging
 from typing import List, Dict, Any, Tuple, Optional
@@ -66,7 +64,6 @@ class FargateDataCopyService:
             if status == 'HAS_NEW_FILES':
                 payers_with_new_files.append(result)
             elif status == 'UP_TO_DATE':
-                # This is a successful state, so we don't add to any list.
                 pass
             else:  # FAILED
                 payers_failed_analysis.append(payer_id)
@@ -74,25 +71,20 @@ class FargateDataCopyService:
         if self.snowflake_manager:
             self.snowflake_manager.close_connection()
 
-        # If no payers had new files to copy, the task is successful.
         if not payers_with_new_files:
             logger.info("No payers had new files to copy. Task is considered successful.")
-            # We still report which payers failed analysis for informational purposes.
             return {"status": "UP_TO_DATE", "failed_payers": payers_failed_analysis}
 
-        # Proceed to copy and process if we have files from at least one payer
         copy_summary = self._execute_copy_and_snowflake_process(
             payers_with_new_files, staging_bucket, app, module, year, month
         )
 
-        # --- START OF LOGIC CHANGE ---
-        # The overall task is a SUCCESS if the copy/Snowflake part had no errors.
-        # Failures during the initial analysis of some payers do not fail the whole task.
+  
         if copy_summary["failed"] == 0:
             return {
                 "status": "SUCCESS",
                 "copy_summary": copy_summary,
-                "failed_payers": payers_failed_analysis  # Informational
+                "failed_payers": payers_failed_analysis  
             }
         else:
             return {

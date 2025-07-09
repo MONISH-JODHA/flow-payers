@@ -42,7 +42,6 @@ def _format_slack_message(status: str, environment: str, details: str, params: O
 
     title_text = f"{status_icon} Fargate Task: *{status.upper()}* in *{environment.upper()}*"
     
-    # Safely extract params for the message body
     year = params.get('year', 'N/A') if params else 'N/A'
     month = params.get('month', 'N/A') if params else 'N/A'
     module = params.get('module', 'N/A') if params else 'N/A'

@@ -55,22 +55,16 @@ class RabbitMQNotifier:
             blocked_connection_timeout=300
         )
 
-    # --- START OF CORRECTION ---
-    # The 'message' parameter is added back here to prevent a TypeError when called from main.py's failure path.
-    # We will still NOT include it in the final JSON payload to respect the consumer's expected format.
     def send_notification(self, month: int, year: int, module: str, payer_ids: List[str], status: str, partner_id: int, message: Optional[str] = None) -> bool:
-    # --- END OF CORRECTION ---
         """
         Establishes a connection, sends a single notification message with retry logic,
         and ensures the connection is closed.
         
         This version creates the exact payload format the consumer expects.
         """
-        # Force the 'module' to have a capital letter, as required by the consumer.
         # "analytics" -> "Analytics"
         formatted_module = module.capitalize()
 
-        # Build the payload WITHOUT the optional 'message' key, as required.
         payload = {
             "month": month, 
             "year": year, 
@@ -80,7 +74,6 @@ class RabbitMQNotifier:
             "partnerId": partner_id
         }
         
-        # We now add the message to the log for debugging, but not the payload.
         log_message = f"Task finished with status: {status}. Reason: {message}" if message else f"Task finished with status: {status}."
         
         message_body = json.dumps(payload, indent=2)
@@ -99,7 +92,7 @@ class RabbitMQNotifier:
                     routing_key=self.routing_key,
                     body=message_body,
                     properties=pika.BasicProperties(
-                        delivery_mode=2,  # Make message persistent
+                        delivery_mode=2,  
                         content_type='application/json'
                     ),
                     mandatory=True
@@ -108,7 +101,7 @@ class RabbitMQNotifier:
                 logger.info("Successfully published message to RabbitMQ.")
                 logger.info(f"  - Exchange: {self.exchange_name}, Routing Key: {self.routing_key}")
                 logger.info(f"  - Payload Sent: {message_body}")
-                logger.info(f"  - Internal Status Message: {log_message}") # Log the detailed message
+                logger.info(f"  - Internal Status Message: {log_message}") 
                 return True
 
             except AMQPConnectionError as e:

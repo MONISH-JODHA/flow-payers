@@ -33,8 +33,7 @@ S3_CONFIG = {
 }
 
 # --- RabbitMQ Configuration ---
-# BEST PRACTICE: These credentials should be moved to a secrets manager (e.g., AWS Secrets Manager)
-# and retrieved at runtime, not stored in source code.
+
 RABBITMQ_CONFIG = {
     'prod': {
         'host': 'b-77fd0f83-6a7a-467d-a0a8-0f3c39997ac7.mq.us-east-1.amazonaws.com',
@@ -55,7 +54,6 @@ VHOST_MAPPING = {
 }
 
 # --- Snowflake Configuration ---
-# BEST PRACTICE: These credentials should also be in a secrets manager.
 SNOWFLAKE_CONFIG = {
     'user': 'payer_uat_jenkins', 'password': 'R8xVD7w!8A',
     'account': 'tmb05570.us-east-1', 'warehouse': 'PAYER_UAT_SUMMARY_ETL',
@@ -112,25 +110,20 @@ PAYER_CONFIGS = {
 # --- CloudWatch Configuration ---
 CLOUDWATCH_CONFIG = {
     'namespace': 'FargateDataCopy',
-    'region': os.environ.get('AWS_REGION', 'us-east-2') # Region is dynamically set by the Fargate task
+    'region': os.environ.get('AWS_REGION', 'us-east-2') 
 }
 
-# --- START OF CHANGE ---
-# --- Slack Notification Configuration ---
-# BEST PRACTICE: These webhook URLs are secrets and should NOT be stored in source code.
-# They should be stored in AWS Secrets Manager and loaded into the Fargate task's
-# environment variables at runtime. The code reads from environment variables first.
+
 SLACK_CONFIG = {
     'channel_prod_success': 'cln-data-notification-refresh-analytics-prod',
-    'webhook_url_prod_success': os.environ.get('SLACK_WEBHOOK_URL_PROD_SUCCESS', 'https://hooks.slack.com/services/YOUR/PLACEHOLDER/URL_PROD_SUCCESS'),
+    'webhook_url_prod_success': os.environ.get('SLACK_WEBHOOK_URL_PROD_SUCCESS', 'https://hooks.slack.com/services/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'),
     
     'channel_prod_failure': 'cln-data-notification-failures-prod',
-    'webhook_url_prod_failure': os.environ.get('SLACK_WEBHOOK_URL_PROD_FAILURE', 'https://hooks.slack.com/services/YOUR/PLACEHOLDER/URL_PROD_FAILURE'),
+    'webhook_url_prod_failure': os.environ.get('SLACK_WEBHOOK_URL_PROD_FAILURE', 'https://hooks.slack.com/services/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'),
 
     'channel_non_prod': 'sector-144',
-    'webhook_url_non_prod': os.environ.get('SLACK_WEBHOOK_URL_NON_PROD', 'https://hooks.slack.com/services/YOUR/PLACEHOLDER/URL_NON_PROD')
+    'webhook_url_non_prod': os.environ.get('SLACK_WEBHOOK_URL_NON_PROD', 'https://hooks.slack.com/services/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')
 }
-# --- END OF CHANGE ---
 
 def get_environment_config(environment: str) -> Dict[str, Any]:
     """
@@ -139,16 +132,14 @@ def get_environment_config(environment: str) -> Dict[str, Any]:
     """
     env_lower = environment.lower()
     
-    # Start with non-prod defaults
     config = {
         'environment': env_lower,
-        'vhost': VHOST_MAPPING.get(env_lower, 'dev2'), # Default to dev2 vhost if env not in mapping
+        'vhost': VHOST_MAPPING.get(env_lower, 'dev2'), 
         'staging_bucket': NON_PROD_STAGING_BUCKET,
         's3_region': 'us-east-2',
         'rabbitmq_creds': RABBITMQ_CONFIG['non_prod']
     }
 
-    # Environment-specific overrides for Production
     if env_lower == 'prod':
         config.update({
             'staging_bucket': PROD_STAGING_BUCKET,
